@@ -17,13 +17,14 @@ import {
   type Style,
 } from './format.js';
 import { MockEngine, parseMockFile, rulesFromRecording, type MockFile, type MockTool } from './mocks.js';
+import { startHttpProxy, type HttpProxy } from './proxy/http.js';
 import { runMockServer } from './proxy/mock-server.js';
 import { runStdioProxy } from './proxy/stdio.js';
 import { calledTool } from './validate.js';
 import { backfillTokens, backfillValidation } from './recorder.js';
 import { replay, ReplayError, withArguments, type ReplayResult } from './replay.js';
 import { toolsReport } from './report.js';
-import { startUiServer } from './server.js';
+import { isLoopbackHost, startUiServer } from './server.js';
 import { addCases, emptySuite, parseSuite, runSuite, updateExpectations, type Suite } from './suite.js';
 import { formatTokens } from './tokens.js';
 import { defaultDbPath, Store, type MessageRow, type SessionRow } from './store.js';
@@ -34,6 +35,8 @@ const HELP = `mcpspy - see what your AI agent and its MCP servers say to each ot
 Usage:
   mcpspy run [--name <label>] [--mocks <file>] [--db <path>] -- <command> [args...]
   mcpspy -- <command> [args...]            shorthand for run
+  mcpspy proxy <url> [--port <7800>] [--name <label>] [--mocks <file>]
+                                           proxy an MCP server over HTTP (Streamable HTTP or SSE)
   mcpspy tail [-f] [-n <count>] [--session <id>] [--json] [--db <path>]
   mcpspy sessions [--limit <n>] [--db <path>]
   mcpspy show <message-id> [--db <path>]
@@ -52,6 +55,9 @@ agent's MCP config, e.g. in .mcp.json:
 
   "command": "mcpspy",
   "args": ["run", "--name", "github", "--", "npx", "-y", "@modelcontextprotocol/server-github"]
+
+For a server reached over HTTP, start mcpspy proxy <url> and give your agent
+the local URL it prints instead of the server's.
 
 Then watch the traffic with: mcpspy ui --open (or mcpspy tail -f in a terminal)
 
@@ -105,6 +111,8 @@ async function main(argv: string[]): Promise<void> {
       return validate(rest);
     case 'mock':
       return mockCommand(rest);
+    case 'proxy':
+      return proxyCommand(rest);
     default:
       fail(`unknown command "${first}". Run mcpspy --help.`);
   }
@@ -128,6 +136,45 @@ async function run(argv: string[]): Promise<void> {
   // stdin may still be open (the agent closed nothing); don't let it hold us up.
   process.stdin.destroy();
   process.exitCode = exitCode;
+}
+
+async function proxyCommand(argv: string[]): Promise<void> {
+  const { values, positionals } = parseArgs({
+    args: argv,
+    allowPositionals: true,
+    options: {
+      port: { type: 'string', default: '7800' },
+      host: { type: 'string', default: '127.0.0.1' },
+      name: { type: 'string' },
+      mocks: { type: 'string' },
+      db: { type: 'string' },
+    },
+  });
+  if (positionals.length !== 1) fail('proxy needs the server URL, e.g. mcpspy proxy https://mcp.example.com/mcp');
+  const port = Number.parseInt(values.port, 10);
+  if (!Number.isInteger(port) || port < 0 || port > 65535) fail('--port must be a port number');
+  if (!isLoopbackHost(values.host)) fail('--host must be a loopback address; recorded traffic can contain secrets');
+
+  const mocks = values.mocks !== undefined ? loadMocks(values.mocks, values.name ?? null) : undefined;
+  const store = new Store(values.db);
+  let proxy: HttpProxy;
+  try {
+    proxy = await startHttpProxy({ upstream: positionals[0]!, store, name: values.name ?? null, host: values.host, port, mocks });
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    fail(code === 'EADDRINUSE' ? `port ${port} is in use; pick another with --port` : (error as Error).message);
+  }
+  const style = styleFor(process.stderr);
+  process.stderr.write(`mcpspy proxying ${positionals[0]}\nPoint your agent at ${style.cyan(proxy.url)}\n`);
+
+  const stop = () => {
+    void proxy.close().then(() => {
+      store.close();
+      process.exit(0);
+    });
+  };
+  process.once('SIGINT', stop);
+  process.once('SIGTERM', stop);
 }
 
 function loadMocks(path: string, serverName: string | null): MockEngine {
@@ -291,9 +338,11 @@ function sessions(argv: string[]): void {
         ? style.green('running')
         : session.exit_signal
           ? style.yellow(`killed ${session.exit_signal}`)
-          : session.exit_code === 0
-            ? style.dim(`exit 0`)
-            : style.red(`exit ${session.exit_code}`);
+          : session.exit_code === null
+            ? style.dim('closed')
+            : session.exit_code === 0
+              ? style.dim(`exit 0`)
+              : style.red(`exit ${session.exit_code}`);
     const duration = session.ended_at !== null ? style.dim(formatDuration(session.ended_at - session.started_at)) : '';
     const command = (JSON.parse(session.command) as string[]).join(' ');
     process.stdout.write(
