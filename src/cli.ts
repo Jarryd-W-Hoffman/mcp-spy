@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { spawn } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { comparableBody, diffLines, hunks, jsonLines } from './diff.js';
@@ -20,6 +20,7 @@ import { backfillTokens } from './recorder.js';
 import { replay, ReplayError, withArguments, type ReplayResult } from './replay.js';
 import { toolsReport } from './report.js';
 import { startUiServer } from './server.js';
+import { addCases, emptySuite, parseSuite, runSuite, updateExpectations, type Suite } from './suite.js';
 import { formatTokens } from './tokens.js';
 import { defaultDbPath, Store, type MessageRow, type SessionRow } from './store.js';
 
@@ -35,6 +36,8 @@ Usage:
   mcpspy tokens [--session <id>] [--exact] [--model <id>] [--db <path>]
   mcpspy diff <message-id> <message-id> [--db <path>]
   mcpspy replay <message-id> [--args <json> | --params <json>] [--repeat <n>] [-e KEY=VALUE]... [--json]
+  mcpspy suite add <file> <message-id>... [--name <case name>]
+  mcpspy suite run <file> [--update] [--only <text>] [--json]
 
 Wrap a stdio MCP server by putting mcpspy in front of its command in your
 agent's MCP config, e.g. in .mcp.json:
@@ -88,6 +91,8 @@ async function main(argv: string[]): Promise<void> {
       return diff(rest);
     case 'replay':
       return replayCommand(rest);
+    case 'suite':
+      return suiteCommand(rest);
     default:
       fail(`unknown command "${first}". Run mcpspy --help.`);
   }
@@ -531,6 +536,106 @@ async function replayCommand(argv: string[]): Promise<void> {
     out('Response (the original had none):');
     out(prettyPayload(JSON.stringify(last.response)));
   }
+}
+
+async function suiteCommand(argv: string[]): Promise<void> {
+  const [action, ...rest] = argv;
+  const { values, positionals } = parseArgs({
+    args: rest,
+    allowPositionals: true,
+    options: {
+      name: { type: 'string' },
+      update: { type: 'boolean' },
+      only: { type: 'string' },
+      timeout: { type: 'string', default: '30000' },
+      json: { type: 'boolean' },
+      db: { type: 'string' },
+    },
+  });
+  const [file, ...ids] = positionals;
+  if (!file || (action !== 'add' && action !== 'run')) {
+    fail('usage: mcpspy suite add <file> <message-id>... [--name <case name>] | mcpspy suite run <file> [--update] [--only <text>]');
+  }
+  const style = styleFor(process.stdout);
+  const out = (line = '') => process.stdout.write(`${line}\n`);
+  const load = (): Suite => {
+    if (!existsSync(file)) return emptySuite();
+    try {
+      return parseSuite(readFileSync(file, 'utf8'));
+    } catch (error) {
+      fail(`${file}: ${(error as Error).message}`);
+    }
+  };
+  const save = (suite: Suite) => writeFileSync(file, `${JSON.stringify(suite, null, 2)}\n`);
+
+  if (action === 'add') {
+    if (ids.length === 0) fail('suite add needs at least one message id (a request from the agent)');
+    const suite = load();
+    const store = new Store(values.db);
+    try {
+      const added = addCases(suite, file, store, ids.map((id) => parseId(id, 'message id')), values.name);
+      save(suite);
+      for (const testCase of added) out(`${style.green('+')} ${testCase.name} ${style.dim(`(${testCase.server})`)}`);
+      out(style.dim(`${suite.cases.length} cases in ${file}. Add "ignore": ["path"] to a case for values that change between runs.`));
+    } catch (error) {
+      fail((error as Error).message);
+    } finally {
+      store.close();
+    }
+    return;
+  }
+
+  const suite = load();
+  if (suite.cases.length === 0) fail(`${file} has no cases; add some with mcpspy suite add`);
+  const results = await runSuite(suite, file, {
+    filter: values.only,
+    timeoutMs: parseId(values.timeout, '--timeout'),
+    onResult: values.json
+      ? undefined
+      : (result) => {
+          const latency = result.latencyMs !== null ? style.dim(` ${formatDuration(result.latencyMs)}`) : '';
+          if (result.status === 'pass') out(`${style.green('✓')} ${result.name}${latency}`);
+          else if (result.status === 'error') out(`${style.red('!')} ${result.name}  ${style.red(result.error ?? 'error')}`);
+          else {
+            out(`${style.red('✗')} ${result.name}${latency}`);
+            for (const change of result.changes.slice(0, 10)) {
+              const detail =
+                change.type === 'changed'
+                  ? `${JSON.stringify(change.before)} → ${JSON.stringify(change.after)}`
+                  : change.type === 'added'
+                    ? `added ${JSON.stringify(change.after)}`
+                    : `removed ${JSON.stringify(change.before)}`;
+              out(`    ${style.yellow(change.path)}  ${detail.length > 120 ? `${detail.slice(0, 119)}…` : detail}`);
+            }
+            if (result.changes.length > 10) out(style.dim(`    … ${result.changes.length - 10} more`));
+          }
+        },
+  });
+
+  const counts = { pass: 0, fail: 0, error: 0 };
+  for (const result of results) counts[result.status]++;
+
+  if (values.update && counts.fail > 0) {
+    const updated = updateExpectations(suite, results);
+    save(suite);
+    if (!values.json) out(style.yellow(`Updated ${updated} expectation${updated === 1 ? '' : 's'} in ${file}.`));
+    counts.fail = 0;
+  }
+
+  if (values.json) out(JSON.stringify({ results, ...counts }, null, 2));
+  else {
+    out();
+    out(
+      [
+        style.green(`${counts.pass} passed`),
+        counts.fail ? style.red(`${counts.fail} failed`) : '',
+        counts.error ? style.red(`${counts.error} errored`) : '',
+      ]
+        .filter(Boolean)
+        .join(', '),
+    );
+  }
+  if (counts.fail > 0 || counts.error > 0) process.exitCode = 1;
 }
 
 async function ui(argv: string[]): Promise<void> {
