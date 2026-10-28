@@ -30,6 +30,8 @@ export interface MockRule {
     tool?: string;
     /** Must be contained in the call's arguments (deep subset). */
     arguments?: Record<string, unknown>;
+    /** Must be contained in the request's params (deep subset), e.g. { "uri": "…" }. */
+    params?: Record<string, unknown>;
     /** Only for this server (the session's --name). */
     server?: string;
   };
@@ -153,6 +155,7 @@ export class MockEngine {
     const call = (typeof params === 'object' && params !== null ? params : {}) as { name?: unknown; arguments?: unknown };
     if (match.tool !== undefined && !(typeof call.name === 'string' && glob(match.tool).test(call.name))) return false;
     if (match.arguments !== undefined && !containsSubset(call.arguments ?? {}, match.arguments)) return false;
+    if (match.params !== undefined && !containsSubset(params ?? {}, match.params)) return false;
     return true;
   }
 
@@ -222,4 +225,34 @@ export function containsSubset(value: unknown, subset: unknown): boolean {
   }
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
   return Object.entries(subset).every(([key, item]) => containsSubset((value as Record<string, unknown>)[key], item));
+}
+
+/**
+ * Rules (and tool definitions) that reproduce recorded exchanges, for
+ * `mcpspy mock add`. Each rule matches the call's tool and exact arguments,
+ * or the request's params for other methods.
+ */
+export function rulesFromRecording(
+  request: { id: number; method: string; payload: string },
+  response: { payload: string } | undefined,
+  toolDefinition: MockTool | undefined,
+): { rule: MockRule; tool: MockTool | undefined } {
+  const params = (JSON.parse(request.payload) as { params?: Record<string, unknown> }).params ?? {};
+  const reply = response ? (JSON.parse(response.payload) as { result?: unknown; error?: { code: number; message: string; data?: unknown } }) : {};
+  const action = reply.error !== undefined ? { error: reply.error } : { result: reply.result ?? {} };
+
+  if (request.method === 'tools/call' && typeof params.name === 'string') {
+    return {
+      rule: {
+        name: `${params.name} (recorded #${request.id})`,
+        match: { tool: params.name, arguments: (params.arguments as Record<string, unknown> | undefined) ?? {} },
+        ...action,
+      },
+      tool: toolDefinition,
+    };
+  }
+  return {
+    rule: { name: `${request.method} (recorded #${request.id})`, match: { method: request.method, params }, ...action },
+    tool: undefined,
+  };
 }

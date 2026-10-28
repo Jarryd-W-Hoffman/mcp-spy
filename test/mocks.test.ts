@@ -34,6 +34,9 @@ describe('MockEngine.decide', () => {
       reply: { result: { isError: true, content: [{ text: 'down' }] } },
     });
     expect(mocks.decide('resources/read', { uri: 'x' })).toMatchObject({ reply: { error: { code: -32002 } } });
+    const byUri = engine({ rules: [{ match: { method: 'resources/read', params: { uri: 'file:///a' } }, result: { contents: [] } }] });
+    expect(byUri.decide('resources/read', { uri: 'file:///a' })).not.toBeNull();
+    expect(byUri.decide('resources/read', { uri: 'file:///b' })).toBeNull();
   });
 
   it('supports passthrough with delay, drop, times and probability', () => {
@@ -120,5 +123,26 @@ describe('helpers', () => {
 
   it('leaves unknown template paths alone', () => {
     expect(interpolate('{{arguments.nope}} and {{ arguments.city }}', { arguments: { city: 'Oslo' } })).toBe('{{arguments.nope}} and Oslo');
+  });
+});
+
+describe('rulesFromRecording', () => {
+  it('turns a recorded tool call into a rule that reproduces it', async () => {
+    const { rulesFromRecording } = await import('../src/mocks.js');
+    const { rule, tool } = rulesFromRecording(
+      { id: 7, method: 'tools/call', payload: '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"search","arguments":{"q":"x"}}}' },
+      { payload: '{"jsonrpc":"2.0","id":1,"result":{"content":[]}}' },
+      { name: 'search', inputSchema: { type: 'object' } },
+    );
+    expect(rule).toEqual({ name: 'search (recorded #7)', match: { tool: 'search', arguments: { q: 'x' } }, result: { content: [] } });
+    expect(tool?.name).toBe('search');
+    expect(engine({ rules: [rule] }).decide('tools/call', { name: 'search', arguments: { q: 'x' } })).toMatchObject({ reply: { result: { content: [] } } });
+
+    const other = rulesFromRecording(
+      { id: 8, method: 'resources/read', payload: '{"jsonrpc":"2.0","id":2,"method":"resources/read","params":{"uri":"file:///a"}}' },
+      { payload: '{"jsonrpc":"2.0","id":2,"error":{"code":-32002,"message":"missing"}}' },
+      undefined,
+    );
+    expect(other.rule).toEqual({ name: 'resources/read (recorded #8)', match: { method: 'resources/read', params: { uri: 'file:///a' } }, error: { code: -32002, message: 'missing' } });
   });
 });

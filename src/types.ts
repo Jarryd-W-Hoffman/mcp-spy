@@ -52,6 +52,8 @@ export interface MessageRow {
   token_detail: string | null;
   /** JSON array of schema and protocol issues found in this message, or null. */
   issues: string | null;
+  /** The mock rule that produced or changed this message, or null for real traffic. */
+  mock: string | null;
 }
 
 export type NewMessage = Omit<MessageRow, 'id'>;

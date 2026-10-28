@@ -19,6 +19,7 @@ function row(overrides: Partial<MessageRow>): MessageRow {
     tokens: null,
     token_detail: null,
     issues: null,
+    mock: null,
     ...overrides,
   };
 }

@@ -38,7 +38,8 @@ CREATE TABLE IF NOT EXISTS messages (
   latency_ms REAL,
   tokens INTEGER,
   token_detail TEXT,
-  issues TEXT
+  issues TEXT,
+  mock TEXT
 );
 
 CREATE INDEX IF NOT EXISTS messages_session ON messages(session_id, id);
@@ -62,6 +63,7 @@ const MIGRATIONS: [table: string, column: string, definition: string][] = [
   ['sessions', 'env_keys', 'TEXT'],
   ['messages', 'issues', 'TEXT'],
   ['sessions', 'checked', 'INTEGER NOT NULL DEFAULT 0'],
+  ['messages', 'mock', 'TEXT'],
 ];
 
 export function defaultDbPath(): string {
@@ -84,8 +86,8 @@ export class Store {
     this.db.exec(SCHEMA);
     this.migrate();
     this.insertMessageStmt = this.db.prepare(`
-      INSERT INTO messages (session_id, ts, direction, kind, method, rpc_id, payload, size, problem, request_id, latency_ms, tokens, token_detail, issues)
-      VALUES (:session_id, :ts, :direction, :kind, :method, :rpc_id, :payload, :size, :problem, :request_id, :latency_ms, :tokens, :token_detail, :issues)
+      INSERT INTO messages (session_id, ts, direction, kind, method, rpc_id, payload, size, problem, request_id, latency_ms, tokens, token_detail, issues, mock)
+      VALUES (:session_id, :ts, :direction, :kind, :method, :rpc_id, :payload, :size, :problem, :request_id, :latency_ms, :tokens, :token_detail, :issues, :mock)
     `);
   }
 
@@ -120,8 +122,8 @@ export class Store {
       .run({ id, ...end });
   }
 
-  insertMessage(message: NewMessage): number {
-    return Number(this.insertMessageStmt.run({ ...message }).lastInsertRowid);
+  insertMessage(message: Omit<NewMessage, 'mock'> & { mock?: string | null }): number {
+    return Number(this.insertMessageStmt.run({ mock: null, ...message }).lastInsertRowid);
   }
 
   getSession(id: number): SessionRow | undefined {

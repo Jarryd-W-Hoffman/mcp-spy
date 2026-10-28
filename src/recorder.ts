@@ -38,8 +38,11 @@ export class Recorder {
     }
   }
 
-  /** Records one stdio frame sent by the client or the server. */
-  frame(direction: 'client' | 'server', line: string): number[] {
+  /**
+   * Records one stdio frame sent by the client or the server. `mock` names the
+   * mock rule that produced or changed it.
+   */
+  frame(direction: 'client' | 'server', line: string, mock: string | null = null): number[] {
     const ts = this.now();
     const ids: number[] = [];
 
@@ -75,6 +78,7 @@ export class Recorder {
         tokens: cost?.tokens ?? null,
         token_detail: cost?.tools ? JSON.stringify(cost.tools) : null,
         issues: issues.length > 0 ? JSON.stringify(issues) : null,
+        mock,
       });
 
       if (message.kind === 'request' && message.rpcId !== null) {
@@ -104,6 +108,7 @@ export class Recorder {
       tokens: null,
       token_detail: null,
       issues: null,
+      mock: null,
     });
   }
 

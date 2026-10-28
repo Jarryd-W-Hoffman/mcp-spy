@@ -18,6 +18,7 @@ function message(overrides: Partial<MessageSummary>): MessageSummary {
     latency_ms: null,
     tokens: null,
     issues: [],
+    mock: null,
     subject: null,
     error: null,
     preview: null,
