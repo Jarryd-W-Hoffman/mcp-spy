@@ -33,7 +33,7 @@ function oldLog({ wal = true } = {}): string {
 
 function openInChild(path: string): Promise<{ code: number | null; stderr: string }> {
   return new Promise((resolve) => {
-    const child = spawn(process.execPath, ['--import', 'tsx', openStore, path], { stdio: ['ignore', 'ignore', 'pipe'] });
+    const child = spawn(process.execPath, ['--disable-warning=ExperimentalWarning', '--import', 'tsx', openStore, path], { stdio: ['ignore', 'ignore', 'pipe'] });
     let stderr = '';
     child.stderr.on('data', (chunk: Buffer) => (stderr += chunk.toString()));
     child.on('close', (code) => resolve({ code, stderr }));
