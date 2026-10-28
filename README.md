@@ -570,7 +570,6 @@ The tests run against real processes and sockets rather than mocks of them. A st
 
 - **Types, tests and the build** on Node **22.13.0** (the oldest version mcpspy supports, so the `engines` promise is checked) and Node **24**.
 - A **smoke test** of the built CLI: proxy a real stdio server, then read the result back with `tail`.
-- **Tests on macOS and Windows,** where process spawning, signals and paths behave differently.
 - **`npm audit`** for known vulnerabilities in dependencies.
 
 Dependabot proposes grouped weekly updates for npm packages and GitHub Actions.
