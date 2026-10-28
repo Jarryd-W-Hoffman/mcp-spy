@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { backfillTokens, Recorder } from '../src/recorder.js';
+import { backfillTokens, backfillValidation, Recorder } from '../src/recorder.js';
 import { Store } from '../src/store.js';
 
 describe('Recorder', () => {
@@ -89,7 +89,7 @@ describe('Recorder token estimates', () => {
     const id = store.insertMessage({
       session_id: sessionId, ts: 0, direction: 'server', kind: 'response', method: 'tools/call', rpc_id: '1',
       payload: `{"result":{"content":[{"type":"text","text":"${'x'.repeat(70)}"}]}}`, size: 0, problem: null,
-      request_id: null, latency_ms: null, tokens: null, token_detail: null,
+      request_id: null, latency_ms: null, tokens: null, token_detail: null, issues: null,
     });
     expect(backfillTokens(store)).toBe(1);
     expect(store.getMessage(id)?.tokens).toBe(20);
@@ -128,6 +128,68 @@ describe('Store', () => {
     const store = new Store(path);
     expect(store.messagesAfter(0)).toEqual([]);
     expect(store.messagesMissingTokens()).toEqual([]);
+    store.close();
+  });
+});
+
+describe('Recorder validation', () => {
+  const list = JSON.stringify({
+    jsonrpc: '2.0',
+    id: 1,
+    result: {
+      tools: [
+        {
+          name: 'weather',
+          inputSchema: { type: 'object', properties: { city: { type: 'string' } }, required: ['city'] },
+          outputSchema: { type: 'object', properties: { temperature: { type: 'number' } }, required: ['temperature'] },
+        },
+      ],
+    },
+  });
+
+  function record(store: Store, sessionId: number) {
+    const recorder = new Recorder(store, sessionId);
+    recorder.frame('client', '{"jsonrpc":"2.0","id":1,"method":"tools/list"}');
+    recorder.frame('server', list);
+    const [badCall] = recorder.frame('client', '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"weather","arguments":{"city":3}}}');
+    const [badResult] = recorder.frame('server', '{"jsonrpc":"2.0","id":2,"result":{"content":[{"type":"text","text":"x"}],"structuredContent":{"temperature":"hot"}}}');
+    const [goodCall] = recorder.frame('client', '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"weather","arguments":{"city":"Perth"}}}');
+    const [goodResult] = recorder.frame('server', '{"jsonrpc":"2.0","id":3,"result":{"content":[],"structuredContent":{"temperature":31}}}');
+    return { badCall: badCall!, badResult: badResult!, goodCall: goodCall!, goodResult: goodResult! };
+  }
+
+  it('stores issues for arguments and results that break the declared schemas', () => {
+    const store = new Store(':memory:');
+    const sessionId = store.createSession({ name: 's', transport: 'stdio', command: '[]', cwd: '/', pid: null, started_at: 0 });
+    const ids = record(store, sessionId);
+
+    expect(JSON.parse(store.getMessage(ids.badCall)!.issues!)).toEqual([
+      { severity: 'error', path: 'params.arguments.city', message: 'must be string' },
+    ]);
+    expect(JSON.parse(store.getMessage(ids.badResult)!.issues!)).toEqual([
+      { severity: 'error', path: 'result.structuredContent.temperature', message: 'must be number' },
+    ]);
+    expect(store.getMessage(ids.goodCall)!.issues).toBeNull();
+    expect(store.getMessage(ids.goodResult)!.issues).toBeNull();
+    expect(store.messagesWithIssues(sessionId).map((m) => m.id)).toEqual([ids.badResult, ids.badCall]);
+    store.close();
+  });
+
+  it('backfills sessions recorded before validation', () => {
+    const store = new Store(':memory:');
+    const sessionId = store.createSession({ name: 's', transport: 'stdio', command: '[]', cwd: '/', pid: null, started_at: 0 });
+    const ids = record(store, sessionId);
+    // Simulate an old database: no issues stored, session unchecked.
+    store.setIssues(ids.badCall, null);
+    store.setIssues(ids.badResult, null);
+    (store as unknown as { db: { prepare(sql: string): { run(...args: unknown[]): void } } }).db
+      .prepare('UPDATE sessions SET checked = 0 WHERE id = ?')
+      .run(sessionId);
+
+    expect(backfillValidation(store)).toBe(1);
+    expect(store.getMessage(ids.badCall)!.issues).toContain('params.arguments.city');
+    expect(store.getMessage(ids.badResult)!.issues).toContain('result.structuredContent.temperature');
+    expect(backfillValidation(store)).toBe(0);
     store.close();
   });
 });

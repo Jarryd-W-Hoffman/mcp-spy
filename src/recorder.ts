@@ -1,11 +1,14 @@
 import { classifyFrame } from './jsonrpc.js';
 import { contextCost } from './tokens.js';
+import { calledTool, checkMessage, SessionValidator } from './validate.js';
 import type { Direction, NewMessage, Store } from './store.js';
 
 interface PendingRequest {
   messageId: number;
   method: string | null;
   startedAt: number;
+  /** For tools/call, the tool it names, to validate the result against. */
+  tool: string | null;
 }
 
 /**
@@ -15,6 +18,7 @@ interface PendingRequest {
  */
 export class Recorder {
   private readonly pending = new Map<string, PendingRequest>();
+  private readonly validator = new SessionValidator();
 
   constructor(
     private readonly store: Store,
@@ -31,6 +35,7 @@ export class Recorder {
       let requestId: number | null = null;
       let latency: number | null = null;
       let method = message.method;
+      let tool: string | null = null;
 
       if ((message.kind === 'response' || message.kind === 'error') && message.rpcId !== null) {
         const requester = direction === 'server' ? 'client' : 'server';
@@ -41,10 +46,12 @@ export class Recorder {
           requestId = request.messageId;
           latency = ts - request.startedAt;
           method = request.method;
+          tool = request.tool;
         }
       }
 
       const cost = requestId !== null ? contextCost(method, message.json) : null;
+      const issues = checkMessage(this.validator, { direction, kind: message.kind, method, payload: message.json }, tool);
       const id = this.insert(direction, ts, {
         kind: message.kind,
         method,
@@ -55,10 +62,16 @@ export class Recorder {
         latency_ms: latency,
         tokens: cost?.tokens ?? null,
         token_detail: cost?.tools ? JSON.stringify(cost.tools) : null,
+        issues: issues.length > 0 ? JSON.stringify(issues) : null,
       });
 
       if (message.kind === 'request' && message.rpcId !== null) {
-        this.pending.set(`${direction}:${message.rpcId}`, { messageId: id, method: message.method, startedAt: ts });
+        this.pending.set(`${direction}:${message.rpcId}`, {
+          messageId: id,
+          method: message.method,
+          startedAt: ts,
+          tool: message.method === 'tools/call' ? calledTool(message.json) : null,
+        });
       }
       ids.push(id);
     }
@@ -78,6 +91,7 @@ export class Recorder {
       latency_ms: null,
       tokens: null,
       token_detail: null,
+      issues: null,
     });
   }
 
@@ -113,4 +127,27 @@ export function backfillTokens(store: Store): number {
       updated++;
     }
   }
+}
+
+/** Validates sessions recorded before validation existed. */
+export function backfillValidation(store: Store): number {
+  let checked = 0;
+  for (const sessionId of store.uncheckedSessions()) {
+    const validator = new SessionValidator();
+    const tools = new Map<number, string | null>();
+    let after = 0;
+    for (;;) {
+      const batch = store.messagesAfter(after, { sessionId, limit: 1000 });
+      if (batch.length === 0) break;
+      for (const message of batch) {
+        if (message.kind === 'request' && message.method === 'tools/call') tools.set(message.id, calledTool(message.payload));
+        const issues = checkMessage(validator, message, message.request_id !== null ? (tools.get(message.request_id) ?? null) : null);
+        if (issues.length > 0) store.setIssues(message.id, JSON.stringify(issues));
+        after = message.id;
+      }
+    }
+    store.markChecked(sessionId);
+    checked++;
+  }
+  return checked;
 }

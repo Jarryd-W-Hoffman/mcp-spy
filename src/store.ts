@@ -19,7 +19,8 @@ CREATE TABLE IF NOT EXISTS sessions (
   exit_code INTEGER,
   exit_signal TEXT,
   replay_of INTEGER,
-  env_keys TEXT
+  env_keys TEXT,
+  checked INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS messages (
@@ -36,7 +37,8 @@ CREATE TABLE IF NOT EXISTS messages (
   request_id INTEGER REFERENCES messages(id),
   latency_ms REAL,
   tokens INTEGER,
-  token_detail TEXT
+  token_detail TEXT,
+  issues TEXT
 );
 
 CREATE INDEX IF NOT EXISTS messages_session ON messages(session_id, id);
@@ -58,6 +60,8 @@ const MIGRATIONS: [table: string, column: string, definition: string][] = [
   ['messages', 'token_detail', 'TEXT'],
   ['sessions', 'replay_of', 'INTEGER'],
   ['sessions', 'env_keys', 'TEXT'],
+  ['messages', 'issues', 'TEXT'],
+  ['sessions', 'checked', 'INTEGER NOT NULL DEFAULT 0'],
 ];
 
 export function defaultDbPath(): string {
@@ -80,8 +84,8 @@ export class Store {
     this.db.exec(SCHEMA);
     this.migrate();
     this.insertMessageStmt = this.db.prepare(`
-      INSERT INTO messages (session_id, ts, direction, kind, method, rpc_id, payload, size, problem, request_id, latency_ms, tokens, token_detail)
-      VALUES (:session_id, :ts, :direction, :kind, :method, :rpc_id, :payload, :size, :problem, :request_id, :latency_ms, :tokens, :token_detail)
+      INSERT INTO messages (session_id, ts, direction, kind, method, rpc_id, payload, size, problem, request_id, latency_ms, tokens, token_detail, issues)
+      VALUES (:session_id, :ts, :direction, :kind, :method, :rpc_id, :payload, :size, :problem, :request_id, :latency_ms, :tokens, :token_detail, :issues)
     `);
   }
 
@@ -99,8 +103,8 @@ export class Store {
   ): number {
     const result = this.db
       .prepare(
-        `INSERT INTO sessions (name, transport, command, cwd, pid, started_at, replay_of, env_keys)
-         VALUES (:name, :transport, :command, :cwd, :pid, :started_at, :replay_of, :env_keys)`,
+        `INSERT INTO sessions (name, transport, command, cwd, pid, started_at, replay_of, env_keys, checked)
+         VALUES (:name, :transport, :command, :cwd, :pid, :started_at, :replay_of, :env_keys, 1)`,
       )
       .run({ replay_of: null, env_keys: null, ...session });
     return Number(result.lastInsertRowid);
@@ -146,6 +150,28 @@ export class Store {
          ORDER BY id LIMIT ?`,
       )
       .all(limit) as unknown as MessageRow[];
+  }
+
+  /** Sessions recorded before messages were validated as they arrived. */
+  uncheckedSessions(): number[] {
+    return (this.db.prepare('SELECT id FROM sessions WHERE checked = 0 ORDER BY id').all() as { id: number }[]).map((row) => row.id);
+  }
+
+  markChecked(sessionId: number): void {
+    this.db.prepare('UPDATE sessions SET checked = 1 WHERE id = ?').run(sessionId);
+  }
+
+  setIssues(id: number, issues: string | null): void {
+    this.db.prepare('UPDATE messages SET issues = ? WHERE id = ?').run(issues, id);
+  }
+
+  /** Messages with issues, newest first, optionally for one session. */
+  messagesWithIssues(sessionId?: number, limit = 500): MessageRow[] {
+    return (
+      sessionId !== undefined
+        ? this.db.prepare('SELECT * FROM messages WHERE issues IS NOT NULL AND session_id = ? ORDER BY id DESC LIMIT ?').all(sessionId, limit)
+        : this.db.prepare('SELECT * FROM messages WHERE issues IS NOT NULL ORDER BY id DESC LIMIT ?').all(limit)
+    ) as unknown as MessageRow[];
   }
 
   setTokens(id: number, tokens: number, detail: string | null): void {

@@ -3,6 +3,12 @@
  * of runtime imports so the browser bundle can use it.
  */
 
+export interface Issue {
+  severity: 'error' | 'warning';
+  path: string;
+  message: string;
+}
+
 export type MessageKind = 'request' | 'notification' | 'response' | 'error' | 'invalid';
 
 /** Who put the bytes on the wire. "stderr" is the server's log output. */
@@ -23,6 +29,8 @@ export interface SessionRow {
   replay_of: number | null;
   /** JSON array of environment variable names the server was started with (names only, never values). */
   env_keys: string | null;
+  /** 1 once the session's messages have been validated. */
+  checked: number;
 }
 
 export interface MessageRow {
@@ -42,6 +50,8 @@ export interface MessageRow {
   tokens: number | null;
   /** JSON breakdown of `tokens` (per-tool costs for tools/list). */
   token_detail: string | null;
+  /** JSON array of schema and protocol issues found in this message, or null. */
+  issues: string | null;
 }
 
 export type NewMessage = Omit<MessageRow, 'id'>;
@@ -49,7 +59,9 @@ export type NewMessage = Omit<MessageRow, 'id'>;
 export type SessionSummary = SessionRow & { message_count: number };
 
 /** A message without its payload, plus the bits the list view needs. */
-export interface MessageSummary extends Omit<MessageRow, 'payload' | 'token_detail'> {
+export interface MessageSummary extends Omit<MessageRow, 'payload' | 'token_detail' | 'issues'> {
+  /** Parsed issues (see MessageRow.issues). */
+  issues: Issue[];
   /** Tool, prompt or resource a request is about. */
   subject: string | null;
   /** Error text for JSON-RPC errors and tool results flagged isError. */
