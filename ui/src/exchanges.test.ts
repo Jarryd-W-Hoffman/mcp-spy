@@ -16,6 +16,8 @@ function message(overrides: Partial<MessageSummary>): MessageSummary {
     problem: null,
     request_id: null,
     latency_ms: null,
+    tokens: null,
+    token_detail: null,
     subject: null,
     error: null,
     preview: null,

@@ -1,4 +1,5 @@
 import { classifyFrame } from './jsonrpc.js';
+import { contextCost } from './tokens.js';
 import type { Direction, NewMessage, Store } from './store.js';
 
 interface PendingRequest {
@@ -43,6 +44,7 @@ export class Recorder {
         }
       }
 
+      const cost = requestId !== null ? contextCost(method, message.json) : null;
       const id = this.insert(direction, ts, {
         kind: message.kind,
         method,
@@ -51,6 +53,8 @@ export class Recorder {
         problem: message.problem,
         request_id: requestId,
         latency_ms: latency,
+        tokens: cost?.tokens ?? null,
+        token_detail: cost?.tools ? JSON.stringify(cost.tools) : null,
       });
 
       if (message.kind === 'request' && message.rpcId !== null) {
@@ -72,6 +76,8 @@ export class Recorder {
       problem: null,
       request_id: null,
       latency_ms: null,
+      tokens: null,
+      token_detail: null,
     });
   }
 
@@ -92,5 +98,19 @@ export class Recorder {
       size: Buffer.byteLength(fields.payload),
       ...fields,
     });
+  }
+}
+
+/** Estimates tokens for replies recorded before estimates existed. */
+export function backfillTokens(store: Store): number {
+  let updated = 0;
+  for (;;) {
+    const batch = store.messagesMissingTokens();
+    if (batch.length === 0) return updated;
+    for (const message of batch) {
+      const cost = contextCost(message.method, message.payload);
+      store.setTokens(message.id, cost?.tokens ?? 0, cost?.tools ? JSON.stringify(cost.tools) : null);
+      updated++;
+    }
   }
 }

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { Recorder } from '../src/recorder.js';
+import { backfillTokens, Recorder } from '../src/recorder.js';
 import { Store } from '../src/store.js';
 
 describe('Recorder', () => {
@@ -61,5 +61,73 @@ describe('Recorder', () => {
     recorder.frame('client', '{"jsonrpc":"2.0","id":1,"method":"tools/call"}');
     recorder.frame('client', '{"jsonrpc":"2.0","method":"notifications/initialized"}');
     expect(recorder.unanswered()).toBe(1);
+  });
+});
+
+describe('Recorder token estimates', () => {
+  it('estimates context cost for tool results and tool lists', () => {
+    const store = new Store(':memory:');
+    const sessionId = store.createSession({ name: 's', transport: 'stdio', command: '[]', cwd: '/', pid: null, started_at: 0 });
+    const recorder = new Recorder(store, sessionId);
+
+    recorder.frame('client', '{"jsonrpc":"2.0","id":1,"method":"tools/list"}');
+    const [list] = recorder.frame('server', '{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"a","inputSchema":{"type":"object"}}]}}');
+    recorder.frame('client', '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"a"}}');
+    const [call] = recorder.frame('server', `{"jsonrpc":"2.0","id":2,"result":{"content":[{"type":"text","text":"${'x'.repeat(35)}"}]}}`);
+    recorder.frame('client', '{"jsonrpc":"2.0","id":3,"method":"ping"}');
+    const [ping] = recorder.frame('server', '{"jsonrpc":"2.0","id":3,"result":{}}');
+
+    expect(store.getMessage(list!)).toMatchObject({ tokens: expect.any(Number), token_detail: expect.stringContaining('"name":"a"') });
+    expect(store.getMessage(call!)).toMatchObject({ tokens: 10, token_detail: null });
+    expect(store.getMessage(ping!)).toMatchObject({ tokens: null });
+    store.close();
+  });
+
+  it('backfills estimates for rows recorded without them', () => {
+    const store = new Store(':memory:');
+    const sessionId = store.createSession({ name: 's', transport: 'stdio', command: '[]', cwd: '/', pid: null, started_at: 0 });
+    const id = store.insertMessage({
+      session_id: sessionId, ts: 0, direction: 'server', kind: 'response', method: 'tools/call', rpc_id: '1',
+      payload: `{"result":{"content":[{"type":"text","text":"${'x'.repeat(70)}"}]}}`, size: 0, problem: null,
+      request_id: null, latency_ms: null, tokens: null, token_detail: null,
+    });
+    expect(backfillTokens(store)).toBe(1);
+    expect(store.getMessage(id)?.tokens).toBe(20);
+    expect(backfillTokens(store)).toBe(0);
+    store.close();
+  });
+});
+
+describe('Store', () => {
+  it('finds the previous session of the same server', () => {
+    const store = new Store(':memory:');
+    const make = (name: string | null, command: string) =>
+      store.createSession({ name, transport: 'stdio', command, cwd: '/', pid: null, started_at: 0 });
+    const a1 = make('a', '["x"]');
+    make('b', '["x"]');
+    const a2 = make('a', '["y"]');
+    const n1 = make(null, '["z"]');
+    const n2 = make(null, '["z"]');
+    expect(store.previousSession(a2)?.id).toBe(a1);
+    expect(store.previousSession(a1)).toBeUndefined();
+    expect(store.previousSession(n2)?.id).toBe(n1);
+    store.close();
+  });
+
+  it('adds new columns to databases created by older versions', async () => {
+    const { DatabaseSync } = await import('node:sqlite');
+    const { mkdtempSync } = await import('node:fs');
+    const { join } = await import('node:path');
+    const { tmpdir } = await import('node:os');
+    const path = join(mkdtempSync(join(tmpdir(), 'mcpspy-')), 'old.db');
+    const old = new DatabaseSync(path);
+    old.exec(`CREATE TABLE messages (id INTEGER PRIMARY KEY, session_id INTEGER NOT NULL, ts REAL NOT NULL, direction TEXT NOT NULL,
+      kind TEXT NOT NULL, method TEXT, rpc_id TEXT, payload TEXT NOT NULL, size INTEGER NOT NULL, problem TEXT,
+      request_id INTEGER, latency_ms REAL)`);
+    old.close();
+    const store = new Store(path);
+    expect(store.messagesAfter(0)).toEqual([]);
+    expect(store.messagesMissingTokens()).toEqual([]);
+    store.close();
   });
 });

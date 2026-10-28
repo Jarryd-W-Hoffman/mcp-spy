@@ -16,6 +16,8 @@ function row(overrides: Partial<MessageRow>): MessageRow {
     problem: null,
     request_id: null,
     latency_ms: null,
+    tokens: null,
+    token_detail: null,
     ...overrides,
   };
 }

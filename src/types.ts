@@ -34,6 +34,10 @@ export interface MessageRow {
   problem: string | null;
   request_id: number | null;
   latency_ms: number | null;
+  /** Estimated tokens this message puts in the model's context, if any. */
+  tokens: number | null;
+  /** JSON breakdown of `tokens` (per-tool costs for tools/list). */
+  token_detail: string | null;
 }
 
 export type NewMessage = Omit<MessageRow, 'id'>;
@@ -59,3 +63,32 @@ export interface MessageDetail {
 export type ServerEvent =
   | { type: 'messages'; messages: MessageSummary[] }
   | { type: 'sessions'; sessions: SessionSummary[] };
+
+export interface ToolCallStats {
+  name: string;
+  calls: number;
+  errors: number;
+  avgLatency: number | null;
+  maxLatency: number | null;
+  /** Estimated tokens of all results combined, and of the largest one. */
+  totalTokens: number;
+  maxTokens: number;
+}
+
+export interface ToolChange {
+  name: string;
+  change: 'added' | 'removed' | 'changed';
+  /** Top-level fields that differ, for changed tools (description, inputSchema, …). */
+  fields: string[];
+  tokenDelta: number;
+}
+
+export interface ToolsReport {
+  sessionId: number;
+  /** Cost of the tool definitions from the session's latest tools/list. */
+  definitions: { messageId: number; total: number; tools: { name: string; tokens: number }[] } | null;
+  calls: ToolCallStats[];
+  /** Earlier session of the same server whose tool list we compared against. */
+  previousSessionId: number | null;
+  changes: ToolChange[] | null;
+}

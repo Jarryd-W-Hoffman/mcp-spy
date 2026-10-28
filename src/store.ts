@@ -32,12 +32,29 @@ CREATE TABLE IF NOT EXISTS messages (
   size INTEGER NOT NULL,
   problem TEXT,
   request_id INTEGER REFERENCES messages(id),
-  latency_ms REAL
+  latency_ms REAL,
+  tokens INTEGER,
+  token_detail TEXT
 );
 
 CREATE INDEX IF NOT EXISTS messages_session ON messages(session_id, id);
 CREATE INDEX IF NOT EXISTS messages_request ON messages(request_id);
+
+CREATE TABLE IF NOT EXISTS exact_counts (
+  message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+  model TEXT NOT NULL,
+  tokens INTEGER NOT NULL,
+  detail TEXT,
+  counted_at REAL NOT NULL,
+  PRIMARY KEY (message_id, model)
+);
 `;
+
+/** Columns added after the first release, applied to older databases on open. */
+const MIGRATIONS: [column: string, definition: string][] = [
+  ['tokens', 'INTEGER'],
+  ['token_detail', 'TEXT'],
+];
 
 export function defaultDbPath(): string {
   return process.env.MCPSPY_DB ?? join(homedir(), '.mcpspy', 'mcpspy.db');
@@ -57,10 +74,20 @@ export class Store {
     this.db = new DatabaseSync(path);
     this.db.exec('PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000; PRAGMA foreign_keys = ON;');
     this.db.exec(SCHEMA);
+    this.migrate();
     this.insertMessageStmt = this.db.prepare(`
-      INSERT INTO messages (session_id, ts, direction, kind, method, rpc_id, payload, size, problem, request_id, latency_ms)
-      VALUES (:session_id, :ts, :direction, :kind, :method, :rpc_id, :payload, :size, :problem, :request_id, :latency_ms)
+      INSERT INTO messages (session_id, ts, direction, kind, method, rpc_id, payload, size, problem, request_id, latency_ms, tokens, token_detail)
+      VALUES (:session_id, :ts, :direction, :kind, :method, :rpc_id, :payload, :size, :problem, :request_id, :latency_ms, :tokens, :token_detail)
     `);
+  }
+
+  private migrate(): void {
+    const columns = new Set(
+      (this.db.prepare('PRAGMA table_info(messages)').all() as { name: string }[]).map((column) => column.name),
+    );
+    for (const [column, definition] of MIGRATIONS) {
+      if (!columns.has(column)) this.db.exec(`ALTER TABLE messages ADD COLUMN ${column} ${definition}`);
+    }
   }
 
   createSession(session: Pick<SessionRow, 'name' | 'transport' | 'command' | 'cwd' | 'pid' | 'started_at'>): number {
@@ -102,6 +129,69 @@ export class Store {
 
   getMessage(id: number): MessageRow | undefined {
     return this.db.prepare('SELECT * FROM messages WHERE id = ?').get(id) as MessageRow | undefined;
+  }
+
+  /** Replies that carry context (tool results etc.) but have no estimate yet. */
+  messagesMissingTokens(limit = 1000): MessageRow[] {
+    return this.db
+      .prepare(
+        `SELECT * FROM messages
+         WHERE tokens IS NULL AND kind IN ('response', 'error') AND method IN ('tools/list', 'tools/call', 'resources/read', 'prompts/get')
+         ORDER BY id LIMIT ?`,
+      )
+      .all(limit) as unknown as MessageRow[];
+  }
+
+  setTokens(id: number, tokens: number, detail: string | null): void {
+    this.db.prepare('UPDATE messages SET tokens = ?, token_detail = ? WHERE id = ?').run(tokens, detail, id);
+  }
+
+  /** The newest successful reply to `method` in a session. */
+  latestReply(sessionId: number, method: string): MessageRow | undefined {
+    return this.db
+      .prepare(
+        `SELECT * FROM messages WHERE session_id = ? AND method = ? AND kind = 'response' ORDER BY id DESC LIMIT 1`,
+      )
+      .get(sessionId, method) as MessageRow | undefined;
+  }
+
+  /** All replies to tools/call in a session, oldest first, joined to their request. */
+  toolCalls(sessionId: number): (MessageRow & { request_payload: string | null })[] {
+    return this.db
+      .prepare(
+        `SELECT r.*, q.payload AS request_payload FROM messages r
+         LEFT JOIN messages q ON q.id = r.request_id
+         WHERE r.session_id = ? AND r.method = 'tools/call' AND r.kind IN ('response', 'error')
+         ORDER BY r.id`,
+      )
+      .all(sessionId) as unknown as (MessageRow & { request_payload: string | null })[];
+  }
+
+  /** The closest earlier session with the same name, for "what changed" comparisons. */
+  previousSession(sessionId: number): SessionRow | undefined {
+    return this.db
+      .prepare(
+        `SELECT p.* FROM sessions s JOIN sessions p ON p.id < s.id
+         WHERE s.id = ?
+           AND ((s.name IS NOT NULL AND p.name = s.name) OR (s.name IS NULL AND p.name IS NULL AND p.command = s.command))
+         ORDER BY p.id DESC LIMIT 1`,
+      )
+      .get(sessionId) as SessionRow | undefined;
+  }
+
+  saveExactCount(count: { message_id: number; model: string; tokens: number; detail: string | null }): void {
+    this.db
+      .prepare(
+        `INSERT OR REPLACE INTO exact_counts (message_id, model, tokens, detail, counted_at)
+         VALUES (:message_id, :model, :tokens, :detail, :counted_at)`,
+      )
+      .run({ ...count, counted_at: Date.now() });
+  }
+
+  exactCount(messageId: number, model: string): { tokens: number; detail: string | null } | undefined {
+    return this.db
+      .prepare('SELECT tokens, detail FROM exact_counts WHERE message_id = ? AND model = ?')
+      .get(messageId, model) as { tokens: number; detail: string | null } | undefined;
   }
 
   /** The response (or error) recorded for a request, if any. */
