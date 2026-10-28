@@ -2,40 +2,9 @@ import { mkdirSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { DatabaseSync, type StatementSync } from 'node:sqlite';
-import type { MessageKind } from './jsonrpc.js';
+import type { MessageRow, NewMessage, SessionRow } from './types.js';
 
-/** Who put the bytes on the wire. "stderr" is the server's log output. */
-export type Direction = 'client' | 'server' | 'stderr';
-
-export interface SessionRow {
-  id: number;
-  name: string | null;
-  transport: string;
-  command: string;
-  cwd: string;
-  pid: number | null;
-  started_at: number;
-  ended_at: number | null;
-  exit_code: number | null;
-  exit_signal: string | null;
-}
-
-export interface MessageRow {
-  id: number;
-  session_id: number;
-  ts: number;
-  direction: Direction;
-  kind: MessageKind | 'log';
-  method: string | null;
-  rpc_id: string | null;
-  payload: string;
-  size: number;
-  problem: string | null;
-  request_id: number | null;
-  latency_ms: number | null;
-}
-
-export type NewMessage = Omit<MessageRow, 'id'>;
+export type { Direction, MessageRow, NewMessage, SessionRow } from './types.js';
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS sessions (
