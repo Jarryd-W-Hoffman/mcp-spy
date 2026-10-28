@@ -4,12 +4,14 @@ An inspection proxy for [Model Context Protocol](https://modelcontextprotocol.io
 
 Unlike the official MCP Inspector, which is a client *you* drive, mcpspy records what your real agent actually sends.
 
+![mcpspy web UI](docs/screenshot.png)
+
 ## Status
 
-Milestone 1 of 6: stdio proxy, SQLite log, and terminal viewer.
+Milestone 2 of 6.
 
 - [x] stdio proxy, SQLite log, `tail` / `sessions` / `show`
-- [ ] Web UI: live stream, request/response pairs, JSON viewer
+- [x] Web UI: live stream, request/response pairs, JSON viewer
 - [ ] Token estimates per tool call and for `tools/list`, JSON diffing
 - [ ] Replay a recorded call against the server without the agent
 - [ ] Mock rules and schema validation (`inputSchema` / `outputSchema`)
@@ -40,7 +42,15 @@ Prefix the server command in your agent's MCP config with `mcpspy run --`. For e
 }
 ```
 
-Then watch the traffic from another terminal:
+Then open the inspector:
+
+```sh
+mcpspy ui --open      # http://localhost:7777
+```
+
+Every session shows up live. Each row pairs a request with its response, showing status, latency and size. Click a row to see both as a JSON tree or raw text, with tool results rendered the way the agent received them (text and images). Filter by server, text, notifications, stderr or errors only, and move between rows with ↑/↓.
+
+Or stay in the terminal:
 
 ```sh
 mcpspy tail -f
@@ -62,6 +72,7 @@ mcpspy tail -f
 | `mcpspy tail [-f] [-n 50] [--session <id>] [--json]` | Print recorded messages; `-f` follows new ones. `--json` emits NDJSON rows. |
 | `mcpspy sessions [--limit 20]` | List recorded server sessions with exit status and message count. |
 | `mcpspy show <message-id>` | Pretty-print a message alongside its request or response. |
+| `mcpspy ui [--port 7777] [--open]` | Serve the web inspector on localhost. |
 
 Every command accepts `--db <path>`. The default log is `~/.mcpspy/mcpspy.db`, or `$MCPSPY_DB` if set.
 
@@ -72,6 +83,7 @@ Every command accepts `--db <path>`. The default log is `~/.mcpspy/mcpspy.db`, o
 - The server's stderr is passed through and logged, which often explains failures that look silent from the agent.
 - Non-JSON output on stdout (a classic way to break an MCP server) is forwarded as-is and logged as `invalid`.
 - Signals are forwarded to the server, and the proxy exits with the server's exit code.
+- The UI server binds to 127.0.0.1 and rejects requests whose `Host` isn't a loopback name, because recorded payloads can contain tokens and other secrets.
 
 ## Development
 
@@ -79,4 +91,10 @@ Every command accepts `--db <path>`. The default log is `~/.mcpspy/mcpspy.db`, o
 npm test            # vitest
 npm run typecheck
 npm run dev -- tail # run the CLI from source via tsx
+
+# UI with hot reload: API on :7777, Vite on :5173 proxying /api to it
+npm run dev -- ui
+npm run dev:ui
 ```
+
+The web UI lives in `ui/` (React + Vite) and builds into `dist/ui`, which the CLI serves. It has no runtime dependencies: React is bundled at build time.
