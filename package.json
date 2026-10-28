@@ -1,0 +1,29 @@
+{
+  "name": "mcpspy",
+  "version": "0.1.0",
+  "description": "Inspection proxy for Model Context Protocol servers: see, replay and mock the JSON-RPC traffic between AI agents and MCP servers.",
+  "type": "module",
+  "bin": {
+    "mcpspy": "dist/cli.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": ">=22.13"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "dev": "tsx src/cli.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "license": "UNLICENSED",
+  "devDependencies": {
+    "@types/node": "^24.19.2",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.5"
+  }
+}
