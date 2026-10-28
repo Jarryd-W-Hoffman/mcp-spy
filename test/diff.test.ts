@@ -84,6 +84,7 @@ describe('helpers', () => {
     expect(comparableBody('{"jsonrpc":"2.0","id":1,"method":"x","params":{"a":1}}')).toEqual({ a: 1 });
     expect(comparableBody('{"jsonrpc":"2.0","id":1,"result":{"b":2}}')).toEqual({ b: 2 });
     expect(comparableBody('{"jsonrpc":"2.0","id":1,"error":{"code":1}}')).toEqual({ error: { code: 1 } });
+    expect(comparableBody('{"jsonrpc":"2.0","id":6,"method":"resources/list"}')).toBeNull();
     expect(comparableBody('nope')).toBe('nope');
   });
 });

@@ -3,9 +3,13 @@ import { spawn } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
+import { comparableBody, diffLines, hunks, jsonLines } from './diff.js';
 import { formatBytes, formatClock, formatDuration, formatMessageLine, prettyPayload, requestSubject, styleFor } from './format.js';
 import { runStdioProxy } from './proxy/stdio.js';
+import { backfillTokens } from './recorder.js';
+import { toolsReport } from './report.js';
 import { startUiServer } from './server.js';
+import { formatTokens } from './tokens.js';
 import { defaultDbPath, Store, type MessageRow, type SessionRow } from './store.js';
 
 const HELP = `mcpspy - see what your AI agent and its MCP servers say to each other
@@ -17,6 +21,8 @@ Usage:
   mcpspy sessions [--limit <n>] [--db <path>]
   mcpspy show <message-id> [--db <path>]
   mcpspy ui [--port <7777>] [--open] [--db <path>]
+  mcpspy tokens [--session <id>] [--exact] [--model <id>] [--db <path>]
+  mcpspy diff <message-id> <message-id> [--db <path>]
 
 Wrap a stdio MCP server by putting mcpspy in front of its command in your
 agent's MCP config, e.g. in .mcp.json:
@@ -64,6 +70,10 @@ async function main(argv: string[]): Promise<void> {
       return show(rest);
     case 'ui':
       return ui(rest);
+    case 'tokens':
+      return tokens(rest);
+    case 'diff':
+      return diff(rest);
     default:
       fail(`unknown command "${first}". Run mcpspy --help.`);
   }
@@ -236,6 +246,179 @@ function show(argv: string[]): void {
     process.stdout.write(`${header(row)}\n${prettyPayload(row.payload)}\n\n`);
   }
   if (request && !response) process.stdout.write(`${style.yellow('No response recorded.')}\n`);
+}
+
+const DEFAULT_MODEL = 'claude-opus-5-5';
+
+async function tokens(argv: string[]): Promise<void> {
+  const { values } = parseArgs({
+    args: argv,
+    options: {
+      session: { type: 'string' },
+      exact: { type: 'boolean' },
+      model: { type: 'string', default: DEFAULT_MODEL },
+      db: { type: 'string' },
+    },
+  });
+  const store = new Store(values.db);
+  const style = styleFor(process.stdout);
+  backfillTokens(store);
+
+  const sessionId = values.session !== undefined ? parseId(values.session, '--session') : store.listSessions(1)[0]?.id;
+  const session = sessionId !== undefined ? store.getSession(sessionId) : undefined;
+  if (!session) {
+    store.close();
+    fail(sessionId === undefined ? 'no sessions recorded yet' : `no session with id ${sessionId}`);
+  }
+
+  const report = toolsReport(store, session.id);
+  const out = (line = '') => process.stdout.write(`${line}\n`);
+  const label = `${session.name ?? (JSON.parse(session.command) as string[]).join(' ')} #${session.id}`;
+  const kind = values.exact ? `exact, ${values.model}` : 'estimate';
+
+  // Exact counts replace the estimates where we have them.
+  let definitionCosts = report.definitions?.tools ?? [];
+  let definitionTotal = report.definitions?.total ?? 0;
+  let overhead: number | null = null;
+  const exactResults = new Map<string, number>();
+
+  if (values.exact) {
+    process.stderr.write(style.dim(`Counting with the count_tokens API (${values.model}); this sends tool definitions and results to Anthropic.\n`));
+    // Loaded on demand: only --exact needs the SDK.
+    const { describeApiError, ExactCounter } = await import('./exact.js');
+    try {
+      const counter = new ExactCounter(values.model);
+      if (report.definitions) {
+        const cached = store.exactCount(report.definitions.messageId, values.model);
+        const exact = cached
+          ? (JSON.parse(cached.detail!) as Awaited<ReturnType<InstanceType<typeof ExactCounter>['toolDefinitions']>>)
+          : await counter.toolDefinitions(
+              (JSON.parse(store.getMessage(report.definitions.messageId)!.payload) as { result: { tools: unknown[] } }).result.tools,
+            );
+        if (!cached) {
+          store.saveExactCount({ message_id: report.definitions.messageId, model: values.model, tokens: exact.total, detail: JSON.stringify(exact) });
+        }
+        definitionCosts = exact.tools;
+        definitionTotal = exact.total;
+        overhead = exact.overhead;
+      }
+      // The largest result of each tool.
+      const largest = new Map<string, MessageRow & { request_payload: string | null }>();
+      for (const call of store.toolCalls(session.id)) {
+        const name = (call.request_payload && requestSubject('tools/call', call.request_payload)) ?? '(unknown)';
+        if ((call.tokens ?? 0) > (largest.get(name)?.tokens ?? -1)) largest.set(name, call);
+      }
+      for (const [name, call] of largest) {
+        const cached = store.exactCount(call.id, values.model);
+        let count = cached?.tokens;
+        if (count === undefined) {
+          const parsed = JSON.parse(call.payload) as { result?: { content?: unknown[]; isError?: boolean }; error?: { message?: string } };
+          const content = parsed.result?.content ?? [{ type: 'text', text: parsed.error?.message ?? '' }];
+          count = await counter.toolResult(name, content, parsed.result?.isError === true || parsed.error !== undefined);
+          store.saveExactCount({ message_id: call.id, model: values.model, tokens: count, detail: null });
+        }
+        exactResults.set(name, count);
+      }
+    } catch (error) {
+      store.close();
+      fail(`exact count failed: ${describeApiError(error)}`);
+    }
+  }
+  store.close();
+
+  out(`${style.cyan(label)}  ${style.dim(`token counts are ${kind}`)}`);
+  out();
+
+  if (report.definitions) {
+    const sorted = [...definitionCosts].sort((a, b) => b.tokens - a.tokens);
+    out(
+      `Tool definitions: ${style.yellow(`${values.exact ? '' : '≈'}${formatTokens(definitionTotal)} tokens`)} across ${sorted.length} tools, sent with every model request` +
+        (overhead !== null ? style.dim(` (includes ${formatTokens(overhead)} of tool-use preamble)`) : ''),
+    );
+    const widest = Math.max(1, ...sorted.map((tool) => tool.tokens));
+    for (const tool of sorted) {
+      const bar = '█'.repeat(Math.max(1, Math.round((tool.tokens / widest) * 24)));
+      out(`  ${formatTokens(tool.tokens).padStart(6)}  ${style.magenta(bar.padEnd(24))}  ${tool.name}`);
+    }
+  } else {
+    out(style.dim('No tools/list recorded in this session.'));
+  }
+
+  if (report.calls.length > 0) {
+    out();
+    out('Tool calls');
+    out(style.dim(`  ${'tool'.padEnd(28)} ${'calls'.padStart(5)} ${'errors'.padStart(6)} ${'avg'.padStart(8)} ${'max'.padStart(8)}  ${'result tokens: total / largest'}`));
+    for (const stats of report.calls) {
+      const exact = exactResults.get(stats.name);
+      const errors = String(stats.errors).padStart(6);
+      out(
+        `  ${stats.name.padEnd(28)} ${String(stats.calls).padStart(5)} ${stats.errors ? style.red(errors) : errors} ` +
+          `${(stats.avgLatency !== null ? formatDuration(stats.avgLatency) : '-').padStart(8)} ${(stats.maxLatency !== null ? formatDuration(stats.maxLatency) : '-').padStart(8)}  ` +
+          `≈${formatTokens(stats.totalTokens)} / ${exact !== undefined ? `${formatTokens(exact)} exact` : `≈${formatTokens(stats.maxTokens)}`}`,
+      );
+    }
+  }
+
+  if (report.changes) {
+    out();
+    if (report.changes.length === 0) {
+      out(style.dim(`Tool list unchanged since session #${report.previousSessionId}.`));
+    } else {
+      out(`Tool list changes since session #${report.previousSessionId}`);
+      for (const change of report.changes) {
+        const delta = change.tokenDelta === 0 ? '' : style.dim(` (${change.tokenDelta > 0 ? '+' : ''}${change.tokenDelta} tok)`);
+        const marker = change.change === 'added' ? style.green('+') : change.change === 'removed' ? style.red('-') : style.yellow('~');
+        out(`  ${marker} ${change.name}${change.fields.length ? style.dim(`: ${change.fields.join(', ')}`) : ''}${delta}`);
+      }
+    }
+  }
+}
+
+function diff(argv: string[]): void {
+  const { values, positionals } = parseArgs({ args: argv, allowPositionals: true, options: { db: { type: 'string' } } });
+  if (positionals.length !== 2) fail('diff takes two message ids');
+
+  const store = new Store(values.db);
+  const style = styleFor(process.stdout);
+  const [before, after] = positionals.map((value) => {
+    const message = store.getMessage(parseId(value, 'message id'));
+    if (!message) {
+      store.close();
+      fail(`no message with id ${value}`);
+    }
+    return message;
+  }) as [MessageRow, MessageRow];
+
+  // Two requests: compare their arguments and their responses.
+  const pairs: [string, MessageRow | undefined, MessageRow | undefined][] =
+    before.kind === 'request' && after.kind === 'request'
+      ? [
+          ['request', before, after],
+          ['response', store.responseTo(before.id), store.responseTo(after.id)],
+        ]
+      : [['message', before, after]];
+  store.close();
+
+  for (const [title, a, b] of pairs) {
+    process.stdout.write(`${style.cyan(`${title}: #${a?.id ?? '-'} → #${b?.id ?? '-'}`)}\n`);
+    if (!a || !b) {
+      process.stdout.write(style.dim('  missing on one side\n\n'));
+      continue;
+    }
+    const groups = hunks(diffLines(jsonLines(comparableBody(a.payload)), jsonLines(comparableBody(b.payload))));
+    if (groups.length === 0) {
+      process.stdout.write(style.dim('  identical\n\n'));
+      continue;
+    }
+    for (const group of groups) {
+      process.stdout.write(style.dim(`@@ -${group.beforeStart} +${group.afterStart} @@\n`));
+      for (const op of group.ops) {
+        const line = op.type === 'insert' ? style.green(`+${op.text}`) : op.type === 'delete' ? style.red(`-${op.text}`) : ` ${op.text}`;
+        process.stdout.write(`${line}\n`);
+      }
+    }
+    process.stdout.write('\n');
+  }
 }
 
 async function ui(argv: string[]): Promise<void> {

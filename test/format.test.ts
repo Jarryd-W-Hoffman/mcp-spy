@@ -59,9 +59,9 @@ describe('formatMessageLine', () => {
   });
 
   it('formats successful and failed responses with latency', () => {
-    const ok = row({ direction: 'server', kind: 'response', latency_ms: 31, payload: '{"result":{}}' });
+    const ok = row({ direction: 'server', kind: 'response', latency_ms: 31, tokens: 1520, payload: '{"result":{}}' });
     expect(formatMessageLine(ok, session, 'search', plain)).toBe(
-      '09:05:07.042 github     #5 ← tools/call search ✓ 31ms id=3 120B',
+      '09:05:07.042 github     #5 ← tools/call search ✓ 31ms ≈1.5k tok id=3 120B',
     );
 
     const failed = row({ direction: 'server', kind: 'error', payload: '{"error":{"code":1,"message":"bad"}}' });

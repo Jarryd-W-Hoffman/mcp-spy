@@ -1,4 +1,5 @@
 import type { MessageRow, SessionRow } from './store.js';
+import { formatTokens } from './tokens.js';
 
 export interface Style {
   dim(text: string): string;
@@ -124,7 +125,8 @@ export function formatMessageLine(
       const failure = errorSummary(message);
       const status = failure ? style.red(`✗ ${truncate(failure, 80)}`) : style.green('✓');
       const latency = message.latency_ms !== null ? formatDuration(message.latency_ms) : style.yellow('unmatched');
-      return [prefix, arrow(message, style), what, status, latency, id, size].filter(Boolean).join(' ');
+      const tokens = message.tokens ? style.yellow(`≈${formatTokens(message.tokens)} tok`) : '';
+      return [prefix, arrow(message, style), what, status, latency, tokens, id, size].filter(Boolean).join(' ');
     }
   }
 }

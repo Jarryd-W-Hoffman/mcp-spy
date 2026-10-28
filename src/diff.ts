@@ -180,7 +180,7 @@ export function hunks(ops: LineOp[], context = 3): Hunk[] {
 export function comparableBody(payload: string): unknown {
   try {
     const message = JSON.parse(payload) as Record<string, unknown>;
-    if ('params' in message) return message.params;
+    if ('method' in message) return message.params ?? null;
     if ('result' in message) return message.result;
     if ('error' in message) return { error: message.error };
     return message;
