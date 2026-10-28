@@ -8,12 +8,12 @@ Unlike the official MCP Inspector, which is a client *you* drive, mcpspy records
 
 ## Status
 
-Milestone 3 of 6.
+Milestone 4 of 6.
 
 - [x] stdio proxy, SQLite log, `tail` / `sessions` / `show`
 - [x] Web UI: live stream, request/response pairs, JSON viewer
 - [x] Token estimates per tool call and for `tools/list`, JSON diffing
-- [ ] Replay a recorded call against the server without the agent
+- [x] Replay a recorded call against the server without the agent, and replay suites
 - [ ] Mock rules and schema validation (`inputSchema` / `outputSchema`)
 - [ ] Streamable HTTP and SSE proxying
 
@@ -74,6 +74,51 @@ In the UI, click **Compare…** on one row, then select another. The detail pane
 mcpspy diff 12 40             # two requests: diffs their arguments and their responses
 ```
 
+### Replay
+
+Re-run any request the agent made, against a fresh copy of the server, without prompting the agent again. A replay:
+
+- starts the server with the recorded command and working directory,
+- sends the agent's own `initialize`,
+- answers requests the server makes back (such as `roots/list`) with the agent's recorded replies,
+- then sends the request, with the original params or your edits.
+
+Each replay is recorded as a new session tagged *replay of #N*, so it can be inspected and diffed like any other traffic.
+
+In the UI, select a request and click **Replay…** to edit its params and run it. The replayed call opens diffed against the original.
+
+![Replay in the web UI](docs/replay.png)
+
+```sh
+mcpspy replay 42                                # same params; diffs the response against the original
+mcpspy replay 42 --args '{"query":"rust"}'      # new arguments for a tools/call
+mcpspy replay 42 --repeat 20                    # latency spread over 20 runs in one server session
+mcpspy replay 42 -e GITHUB_TOKEN=$GITHUB_TOKEN  # extra environment for the server
+```
+
+mcpspy records the *names* of the environment variables each server started with, never their values. If the original server had config-like variables (API keys, tokens, URLs) that aren't set when you replay, mcpspy names them so you can pass them with `-e` or start `mcpspy ui` with them exported.
+
+### Replay suites
+
+Save recorded calls to a JSON file in your server's repository, then check the server still answers the same way, without an agent:
+
+```sh
+mcpspy suite add mcp.suite.json 42 57 63   # cases from recorded requests
+mcpspy suite run mcp.suite.json            # exits 1 if any response changed
+mcpspy suite run mcp.suite.json --update   # accept the new responses
+```
+
+```
+✓ tools/call echo 6ms
+✗ tools/call search_docs 41ms
+    content[0].text  "3 results" → "0 results"
+✓ tools/call get-sum 1ms
+
+2 passed, 1 failed
+```
+
+The suite stores each server's command, working directory (relative to the suite file when it's below it), `initialize` params and the agent's replies to server requests, plus each case's params and expected `result` or `error`. For values that change between runs, list their paths in a case's `ignore` array. `*` matches one key and `[*]` any array index, e.g. `["structuredContent.now", "content[*].text"]`. Run it in CI like any other test command.
+
 Or stay in the terminal:
 
 ```sh
@@ -96,9 +141,11 @@ mcpspy tail -f
 | `mcpspy tail [-f] [-n 50] [--session <id>] [--json]` | Print recorded messages; `-f` follows new ones. `--json` emits NDJSON rows. |
 | `mcpspy sessions [--limit 20]` | List recorded server sessions with exit status and message count. |
 | `mcpspy show <message-id>` | Pretty-print a message alongside its request or response. |
-| `mcpspy ui [--port 7777] [--open]` | Serve the web inspector on localhost. |
+| `mcpspy ui [--port 7777] [--open] [--read-only]` | Serve the web inspector on localhost. `--read-only` disables replay. |
 | `mcpspy tokens [--session <id>] [--exact] [--model <id>]` | Context cost of a session's tools, call stats, and tool list changes. |
 | `mcpspy diff <id> <id>` | Diff two messages, or two requests and their responses. |
+| `mcpspy replay <id> [--args <json> \| --params <json>] [--repeat <n>] [-e K=V]` | Re-run a recorded request against a fresh server and diff the response. |
+| `mcpspy suite add <file> <id>...` / `mcpspy suite run <file> [--update]` | Save recorded calls as a regression suite, and run it. |
 
 Every command accepts `--db <path>`. The default log is `~/.mcpspy/mcpspy.db`, or `$MCPSPY_DB` if set.
 
@@ -110,6 +157,7 @@ Every command accepts `--db <path>`. The default log is `~/.mcpspy/mcpspy.db`, o
 - Non-JSON output on stdout (a classic way to break an MCP server) is forwarded as-is and logged as `invalid`.
 - Signals are forwarded to the server, and the proxy exits with the server's exit code.
 - The UI server binds to 127.0.0.1 and rejects requests whose `Host` isn't a loopback name, because recorded payloads can contain tokens and other secrets.
+- Replay from the UI starts processes, so its endpoint also requires a custom header and a JSON body, which a cross-site request can't send without a CORS preflight that mcpspy never approves. It also rejects foreign `Origin` and `Sec-Fetch-Site` values. Run `mcpspy ui --read-only` to turn replay off entirely.
 
 ## Development
 
