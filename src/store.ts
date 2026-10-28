@@ -196,7 +196,7 @@ export class Store {
   previousSession(sessionId: number): SessionRow | undefined {
     return this.db
       .prepare(
-        `SELECT p.* FROM sessions s JOIN sessions p ON p.id < s.id
+        `SELECT p.* FROM sessions s JOIN sessions p ON p.id < s.id AND p.replay_of IS NULL
          WHERE s.id = ?
            AND ((s.name IS NOT NULL AND p.name = s.name) OR (s.name IS NULL AND p.name IS NULL AND p.command = s.command))
          ORDER BY p.id DESC LIMIT 1`,

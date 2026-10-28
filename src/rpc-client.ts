@@ -19,6 +19,9 @@ export interface RpcResponse {
   /** The full JSON-RPC response message. */
   message: Record<string, unknown>;
   latencyMs: number;
+  /** Ids of the recorded request and response, when recording. */
+  requestMessageId: number | null;
+  responseMessageId: number | null;
 }
 
 export class RpcError extends Error {}
@@ -28,6 +31,7 @@ interface Pending {
   reject(error: Error): void;
   startedAt: number;
   timer: ReturnType<typeof setTimeout>;
+  requestMessageId: number | null;
 }
 
 /**
@@ -89,8 +93,9 @@ export class StdioRpcClient {
         this.pending.delete(id);
         reject(new RpcError(`${method} timed out after ${timeoutMs}ms${this.stderrTail()}`));
       }, timeoutMs);
-      this.pending.set(id, { resolve, reject, startedAt: performance.now(), timer });
-      this.send({ jsonrpc: '2.0', id, method, ...(params === undefined ? {} : { params }) });
+      const pending: Pending = { resolve, reject, startedAt: performance.now(), timer, requestMessageId: null };
+      this.pending.set(id, pending);
+      pending.requestMessageId = this.send({ jsonrpc: '2.0', id, method, ...(params === undefined ? {} : { params }) });
     });
   }
 
@@ -107,14 +112,16 @@ export class StdioRpcClient {
     return result;
   }
 
-  private send(message: object): void {
+  /** Writes a message and returns its recorded id, if recording. */
+  private send(message: object): number | null {
     const line = JSON.stringify(message);
-    this.options.recorder?.frame('client', line);
+    const recorded = this.options.recorder?.frame('client', line)[0] ?? null;
     if (this.child.stdin.writable) this.child.stdin.write(`${line}\n`);
+    return recorded;
   }
 
   private onLine(line: string): void {
-    this.options.recorder?.frame('server', line);
+    const recorded = this.options.recorder?.frame('server', line)[0] ?? null;
     let message: Record<string, unknown>;
     try {
       message = JSON.parse(line) as Record<string, unknown>;
@@ -131,7 +138,12 @@ export class StdioRpcClient {
     if (pending) {
       this.pending.delete(message.id as number);
       clearTimeout(pending.timer);
-      pending.resolve({ message, latencyMs: performance.now() - pending.startedAt });
+      pending.resolve({
+        message,
+        latencyMs: performance.now() - pending.startedAt,
+        requestMessageId: pending.requestMessageId,
+        responseMessageId: recorded,
+      });
     }
   }
 
