@@ -1,4 +1,4 @@
-import { classifyFrame } from './jsonrpc.js';
+import { classifyFrame, requestsLaterPage } from './jsonrpc.js';
 import { contextCost } from './tokens.js';
 import { calledTool, checkMessage, SessionValidator } from './validate.js';
 import type { Direction, NewMessage, Store } from './store.js';
@@ -9,6 +9,8 @@ interface PendingRequest {
   startedAt: number;
   /** For tools/call, the tool it names, to validate the result against. */
   tool: string | null;
+  /** For tools/list, whether it asks for a later page. */
+  laterPage: boolean;
 }
 
 /**
@@ -51,6 +53,7 @@ export class Recorder {
       let latency: number | null = null;
       let method = message.method;
       let tool: string | null = null;
+      let laterPage = false;
 
       if ((message.kind === 'response' || message.kind === 'error') && message.rpcId !== null) {
         const requester = direction === 'server' ? 'client' : 'server';
@@ -62,11 +65,12 @@ export class Recorder {
           latency = ts - request.startedAt;
           method = request.method;
           tool = request.tool;
+          laterPage = request.laterPage;
         }
       }
 
       const cost = requestId !== null ? contextCost(method, message.json) : null;
-      const issues = checkMessage(this.validator, { direction, kind: message.kind, method, payload: message.json }, tool);
+      const issues = checkMessage(this.validator, { direction, kind: message.kind, method, payload: message.json }, tool, laterPage);
       const id = this.insert(direction, ts, {
         kind: message.kind,
         method,
@@ -87,6 +91,7 @@ export class Recorder {
           method: message.method,
           startedAt: ts,
           tool: message.method === 'tools/call' ? calledTool(message.json) : null,
+          laterPage: message.method === 'tools/list' && requestsLaterPage(message.json),
         });
       }
       ids.push(id);
@@ -152,13 +157,16 @@ export function backfillValidation(store: Store): number {
   for (const sessionId of store.uncheckedSessions()) {
     const validator = new SessionValidator();
     const tools = new Map<number, string | null>();
+    const laterPages = new Set<number>();
     let after = 0;
     for (;;) {
       const batch = store.messagesAfter(after, { sessionId, limit: 1000 });
       if (batch.length === 0) break;
       for (const message of batch) {
         if (message.kind === 'request' && message.method === 'tools/call') tools.set(message.id, calledTool(message.payload));
-        const issues = checkMessage(validator, message, message.request_id !== null ? (tools.get(message.request_id) ?? null) : null);
+        if (message.kind === 'request' && message.method === 'tools/list' && requestsLaterPage(message.payload)) laterPages.add(message.id);
+        const request = message.request_id;
+        const issues = checkMessage(validator, message, request !== null ? (tools.get(request) ?? null) : null, request !== null && laterPages.has(request));
         if (issues.length > 0) store.setIssues(message.id, JSON.stringify(issues));
         after = message.id;
       }

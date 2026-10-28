@@ -72,3 +72,14 @@ function classifyValue(value: unknown, json: string): ClassifiedMessage {
 function invalid(json: string, problem: string): ClassifiedMessage {
   return { kind: 'invalid', json, method: null, rpcId: null, problem };
 }
+
+/** Whether a tools/list (or other list) request asks for a later page, i.e. sends a cursor. */
+export function requestsLaterPage(requestPayload: string | null): boolean {
+  if (requestPayload === null) return false;
+  try {
+    const params = (JSON.parse(requestPayload) as { params?: { cursor?: unknown } }).params;
+    return params?.cursor !== undefined;
+  } catch {
+    return false;
+  }
+}

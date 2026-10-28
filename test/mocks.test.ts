@@ -71,13 +71,13 @@ describe('MockEngine.decide', () => {
 describe('MockEngine tools', () => {
   it('adds mock tools to a tool list, replacing real ones with the same name', () => {
     const mocks = engine({ tools: [{ name: 'search', inputSchema: { type: 'object' }, description: 'mocked' }, { name: 'extra', inputSchema: { type: 'object' } }] });
-    const patched = mocks.patchToolList({ tools: [{ name: 'search', description: 'real' }, { name: 'fetch' }], nextCursor: 'x' }) as { tools: { name: string; description?: string }[]; nextCursor: string };
+    const patched = mocks.patchToolList({ tools: [{ name: 'search', description: 'real' }, { name: 'fetch' }], _meta: { x: 1 } }) as { tools: { name: string; description?: string }[]; _meta: unknown };
     expect(patched.tools.map((tool) => [tool.name, tool.description])).toEqual([
       ['fetch', undefined],
       ['search', 'mocked'],
       ['extra', undefined],
     ]);
-    expect(patched.nextCursor).toBe('x');
+    expect(patched._meta).toEqual({ x: 1 });
   });
 });
 

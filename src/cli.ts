@@ -248,7 +248,7 @@ function parseMockFileOrFail(path: string): MockFile {
 
 /** The definition of a tool from the latest tools/list in a session. */
 function recordedTool(store: Store, sessionId: number, name: string): MockTool | undefined {
-  const list = store.latestReply(sessionId, 'tools/list');
+  const list = store.latestToolList(sessionId);
   if (!list) return undefined;
   const tools = (JSON.parse(list.payload) as { result?: { tools?: MockTool[] } }).result?.tools ?? [];
   return tools.find((tool) => tool.name === name);
@@ -452,7 +452,7 @@ async function tokens(argv: string[]): Promise<void> {
         const exact = cached
           ? (JSON.parse(cached.detail!) as Awaited<ReturnType<InstanceType<typeof ExactCounter>['toolDefinitions']>>)
           : await counter.toolDefinitions(
-              (JSON.parse(store.getMessage(report.definitions.messageId)!.payload) as { result: { tools: unknown[] } }).result.tools,
+              (JSON.parse(store.latestToolList(session.id)!.payload) as { result: { tools: unknown[] } }).result.tools,
             );
         if (!cached) {
           store.saveExactCount({ message_id: report.definitions.messageId, model: values.model, tokens: exact.total, detail: JSON.stringify(exact) });

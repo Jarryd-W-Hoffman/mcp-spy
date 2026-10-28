@@ -62,14 +62,17 @@ const TOOL_NAME = /^[A-Za-z0-9_.-]{1,128}$/;
 export class SessionValidator {
   private tools = new Map<string, ToolSchemas>();
 
-  /** Validates a tools/list result and remembers its schemas. */
-  toolList(result: unknown): Issue[] {
+  /**
+   * Validates a tools/list result and remembers its schemas. A later page (the
+   * request sent a cursor) adds to the tools seen so far instead of replacing them.
+   */
+  toolList(result: unknown, laterPage = false): Issue[] {
     const issues: Issue[] = [];
     if (!isObject(result) || !Array.isArray(result.tools)) {
       return [error('result.tools', 'tools/list result must have a tools array')];
     }
 
-    const tools = new Map<string, ToolSchemas>();
+    const tools = laterPage ? new Map(this.tools) : new Map<string, ToolSchemas>();
     result.tools.forEach((tool, index) => {
       const at = `result.tools[${index}]`;
       if (!isObject(tool) || typeof tool.name !== 'string') {
@@ -201,13 +204,14 @@ function isObject(value: unknown): value is Record<string, unknown> {
 
 /**
  * The issues for one recorded message, given the session's validator and,
- * for responses, the tool the request called. Updates the validator when the
- * message is a tool list.
+ * for responses, the tool the request called or whether it asked for a later
+ * page of tools. Updates the validator when the message is a tool list.
  */
 export function checkMessage(
   validator: SessionValidator,
   message: { direction: string; kind: string; method: string | null; payload: string },
   toolName: string | null,
+  laterPage = false,
 ): Issue[] {
   if (message.method === null) return [];
   const isRequest = message.direction === 'client' && message.kind === 'request';
@@ -223,7 +227,7 @@ export function checkMessage(
     return [];
   }
   if (isRequest) return validator.toolCall(parsed.params);
-  if (message.method === 'tools/list') return validator.toolList(parsed.result);
+  if (message.method === 'tools/list') return validator.toolList(parsed.result, laterPage);
   return validator.toolResult(toolName, parsed.result);
 }
 

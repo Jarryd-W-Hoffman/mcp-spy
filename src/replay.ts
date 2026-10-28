@@ -95,7 +95,7 @@ export async function replay(options: ReplayOptions): Promise<ReplayResult> {
   });
 
   const recorder = new Recorder(store, sessionId);
-  const toolList = store.latestReply(originSessionId, 'tools/list');
+  const toolList = store.latestToolList(originSessionId);
   if (toolList) recorder.useToolList(toolList.payload);
 
   const onServerRequest = (method: string) => recordedClientReply(store, originSessionId, method);

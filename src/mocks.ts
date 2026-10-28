@@ -138,13 +138,17 @@ export class MockEngine {
     return null;
   }
 
-  /** A tools/list result with the mock tools added (replacing same-named real ones). */
+  /**
+   * A tools/list result with the mock tools added (replacing same-named real
+   * ones). When the server pages its list, they're added to the last page only.
+   */
   patchToolList(result: unknown): unknown {
     const extra = this.tools;
     if (extra.length === 0 || typeof result !== 'object' || result === null) return result;
     const names = new Set(extra.map((tool) => tool.name));
     const real = Array.isArray((result as { tools?: unknown }).tools) ? (result as { tools: { name?: string }[] }).tools : [];
-    return { ...result, tools: [...real.filter((tool) => !names.has(tool.name ?? '')), ...extra] };
+    const lastPage = typeof (result as { nextCursor?: unknown }).nextCursor !== 'string';
+    return { ...result, tools: [...real.filter((tool) => !names.has(tool.name ?? '')), ...(lastPage ? extra : [])] };
   }
 
   private matches(rule: MockRule, method: string, params: unknown): boolean {
