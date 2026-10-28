@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { MessageSummary, ServerEvent, SessionSummary } from '../../src/types.js';
 
 export type ConnectionState = 'connecting' | 'live' | 'offline';
@@ -12,11 +12,36 @@ interface LiveData {
 }
 
 /**
- * Loads recent messages, then follows the server's event stream. On a dropped
- * connection it reconnects asking only for what it hasn't seen yet.
+ * Adds fresh messages to those held, in id order, keeping at most `max`: the
+ * newest, plus every message of `keepSession` (the one in view), whatever its age.
  */
-export function useLiveData(): LiveData {
+export function mergeMessages(
+  held: MessageSummary[],
+  fresh: MessageSummary[],
+  keepSession: number | null,
+  max = MAX_MESSAGES,
+): { messages: MessageSummary[]; dropped: MessageSummary[] } {
+  let messages = [...held, ...fresh];
+  if (fresh.length > 0 && fresh[0]!.id < (held.at(-1)?.id ?? 0)) messages.sort((a, b) => a.id - b.id);
+  if (messages.length <= max) return { messages, dropped: [] };
+
+  const cutoff = messages.length - max;
+  const dropped = messages.filter((message, index) => index < cutoff && message.session_id !== keepSession);
+  const gone = new Set(dropped);
+  return { messages: messages.filter((message) => !gone.has(message)), dropped };
+}
+
+/**
+ * Loads recent messages, then follows the server's event stream. On a dropped
+ * connection it reconnects asking only for what it hasn't seen yet. Selecting
+ * a session loads its messages too, since older sessions fall outside the
+ * recent ones.
+ */
+export function useLiveData(sessionId: number | null = null): LiveData {
   const [state, setState] = useState<LiveData>({ messages: [], sessions: [], connection: 'connecting' });
+  const mergeRef = useRef<(incoming: MessageSummary[]) => void>(() => {});
+  const sessionRef = useRef(sessionId);
+  sessionRef.current = sessionId;
 
   useEffect(() => {
     let source: EventSource | null = null;
@@ -33,12 +58,13 @@ export function useLiveData(): LiveData {
         lastId = Math.max(lastId, message.id);
       }
       setState((previous) => {
-        let messages = [...previous.messages, ...fresh];
-        if (fresh[0]!.id < (previous.messages.at(-1)?.id ?? 0)) messages.sort((a, b) => a.id - b.id);
-        if (messages.length > MAX_MESSAGES) messages = messages.slice(-MAX_MESSAGES);
+        const { messages, dropped } = mergeMessages(previous.messages, fresh, sessionRef.current);
+        // Forgotten, so selecting their session again fetches them again.
+        for (const message of dropped) seen.delete(message.id);
         return { ...previous, messages };
       });
     };
+    mergeRef.current = merge;
 
     const connect = () => {
       source = new EventSource(`/api/events?after=${lastId}`);
@@ -74,6 +100,22 @@ export function useLiveData(): LiveData {
       source?.close();
     };
   }, []);
+
+  useEffect(() => {
+    if (sessionId === null) return;
+    let cancelled = false;
+    fetch(`/api/messages?session=${sessionId}&tail=5000`)
+      .then((response) => response.json() as Promise<MessageSummary[]>)
+      .then((messages) => {
+        if (!cancelled) mergeRef.current(messages);
+      })
+      .catch(() => {
+        // The event stream reports the server going away.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [sessionId]);
 
   return state;
 }
