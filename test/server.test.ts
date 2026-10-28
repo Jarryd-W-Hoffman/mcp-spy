@@ -7,6 +7,7 @@ import type { MessageDetail, MessageSummary, ServerEvent, SessionSummary, ToolsR
 import { Recorder } from '../src/recorder.js';
 import { isLoopbackHost, startUiServer, type UiServer } from '../src/server.js';
 import { Store } from '../src/store.js';
+import { recordSession } from './helpers.js';
 
 describe('UI server', () => {
   let store: Store;
@@ -132,6 +133,45 @@ describe('UI server tools report', () => {
     expect(summary).not.toHaveProperty('token_detail');
 
     await ui.close();
+    store.close();
+  });
+});
+
+describe('UI server replay', () => {
+  it('replays from the UI and refuses anything that could be cross-site', async () => {
+    const store = new Store(':memory:');
+    const recorded = await recordSession(store);
+    const ui = await startUiServer({ store, port: 0, staticDir: null });
+    const post = (body: unknown, headers: Record<string, string> = { 'content-type': 'application/json', 'x-mcpspy': '1' }) =>
+      fetch(`${ui.url}/api/replay`, { method: 'POST', headers, body: JSON.stringify(body) });
+
+    const ok = await post({ messageId: recorded.echo, params: { name: 'echo', arguments: { text: 'from ui' } } });
+    expect(ok.status).toBe(200);
+    const result = (await ok.json()) as { sessionId: number; runs: { response: unknown }[] };
+    expect(result.runs[0]!.response).toMatchObject({ result: { content: [{ text: 'from ui' }] } });
+    expect(store.getSession(result.sessionId)?.transport).toBe('replay');
+
+    // A form post or a request without the header is refused.
+    expect((await post({ messageId: recorded.echo }, { 'content-type': 'text/plain' })).status).toBe(403);
+    expect((await post({ messageId: recorded.echo }, { 'content-type': 'application/json' })).status).toBe(403);
+    // So is one from another origin, even with the header.
+    expect((await post({ messageId: recorded.echo }, { 'content-type': 'application/json', 'x-mcpspy': '1', origin: 'http://evil.example' })).status).toBe(403);
+    expect((await post({ messageId: recorded.echo }, { 'content-type': 'application/json', 'x-mcpspy': '1', 'sec-fetch-site': 'cross-site' })).status).toBe(403);
+    // Bad input gets a clear error.
+    expect((await post({})).status).toBe(400);
+    const notRequest = await post({ messageId: store.responseTo(recorded.echo)!.id });
+    expect(notRequest.status).toBe(422);
+    expect(await notRequest.json()).toMatchObject({ error: expect.stringMatching(/not a request/) });
+
+    await ui.close();
+    const readOnly = await startUiServer({ store, port: 0, staticDir: null, readOnly: true });
+    const refused = await fetch(`${readOnly.url}/api/replay`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-mcpspy': '1' },
+      body: JSON.stringify({ messageId: recorded.echo }),
+    });
+    expect(refused.status).toBe(403);
+    await readOnly.close();
     store.close();
   });
 });

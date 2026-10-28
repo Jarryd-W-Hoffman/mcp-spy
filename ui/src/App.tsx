@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { DetailPane } from './components/DetailPane';
 import { ExchangeList } from './components/ExchangeList';
 import { SessionList } from './components/SessionList';
+import type { ReplayOutcome } from './components/ReplayPanel';
 import { ToolsView } from './components/ToolsView';
 import { buildExchanges, filterExchanges, type ExchangeFilter } from './exchanges';
 import { useLiveData } from './live';
@@ -18,6 +19,7 @@ export function App() {
   const [selected, setSelected] = useState<number | null>(null);
   const [compareBase, setCompareBase] = useState<number | null>(null);
   const [view, setView] = useState<'traffic' | 'tools'>('traffic');
+  const [notice, setNotice] = useState<string | null>(null);
 
   const exchanges = useMemo(() => buildExchanges(messages), [messages]);
   const visible = useMemo(() => filterExchanges(exchanges, filter), [exchanges, filter]);
@@ -38,6 +40,22 @@ export function App() {
   const compare = (baseId: number, targetId: number) => {
     setCompareBase(baseId);
     setSelected(targetId);
+  };
+
+  // After a replay, show the new call diffed against the original.
+  const onReplayed = (outcome: ReplayOutcome) => {
+    const run = outcome.runs.at(-1);
+    setView('traffic');
+    // Follow the replay into its own session when one session is in view.
+    if (filter.sessionId !== null) update({ sessionId: outcome.sessionId });
+    if (run?.requestId != null) compare(outcome.original.requestId, run.requestId);
+    const runs = outcome.runs.length > 1 ? `${outcome.runs.length} runs` : '1 run';
+    setNotice(
+      `Replayed in session #${outcome.sessionId} (${runs}).` +
+        (outcome.missingEnv.length > 0
+          ? ` The original server had ${outcome.missingEnv.join(', ')} set; start mcpspy ui with them to replay faithfully.`
+          : ''),
+    );
   };
 
   const update = (patch: Partial<ExchangeFilter>) => setFilter((previous) => ({ ...previous, ...patch }));
@@ -96,15 +114,27 @@ export function App() {
           <button role="tab" aria-selected={view === 'tools'} className={view === 'tools' ? 'is-on' : ''} onClick={() => setView('tools')}>
             Tools{toolsSession ? <span className="tab-note"> · {toolsSession.name ?? `#${toolsSession.id}`}</span> : null}
           </button>
-          {compareBase !== null && (
-            <span className="compare-hint">
-              Comparing with {describe(compareBase)}. Select another row.
-              <button className="text-button" onClick={() => setCompareBase(null)}>
-                Clear
-              </button>
-            </span>
-          )}
         </div>
+        {(notice || compareBase !== null) && (
+          <div className="status-row">
+            {notice && (
+              <span className="notice">
+                {notice}
+                <button className="text-button" onClick={() => setNotice(null)} aria-label="Dismiss">
+                  ×
+                </button>
+              </span>
+            )}
+            {compareBase !== null && (
+              <span className="compare-hint">
+                Comparing with {describe(compareBase)}. Select another row.
+                <button className="text-button" onClick={() => setCompareBase(null)}>
+                  Clear
+                </button>
+              </span>
+            )}
+          </div>
+        )}
         {view === 'traffic' ? (
           <ExchangeList
             exchanges={visible}
@@ -127,6 +157,7 @@ export function App() {
           sessionName={sessionsById.get(selectedExchange.primary.session_id)?.name ?? `Session #${selectedExchange.primary.session_id}`}
           compareBase={compareBase}
           onCompareBase={setCompareBase}
+          onReplayed={onReplayed}
           onClose={() => setSelected(null)}
         />
       )}

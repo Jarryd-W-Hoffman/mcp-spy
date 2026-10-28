@@ -32,7 +32,7 @@ Usage:
   mcpspy tail [-f] [-n <count>] [--session <id>] [--json] [--db <path>]
   mcpspy sessions [--limit <n>] [--db <path>]
   mcpspy show <message-id> [--db <path>]
-  mcpspy ui [--port <7777>] [--open] [--db <path>]
+  mcpspy ui [--port <7777>] [--open] [--read-only] [--db <path>]
   mcpspy tokens [--session <id>] [--exact] [--model <id>] [--db <path>]
   mcpspy diff <message-id> <message-id> [--db <path>]
   mcpspy replay <message-id> [--args <json> | --params <json>] [--repeat <n>] [-e KEY=VALUE]... [--json]
@@ -644,13 +644,14 @@ async function ui(argv: string[]): Promise<void> {
     options: {
       port: { type: 'string', short: 'p', default: '7777' },
       open: { type: 'boolean' },
+      'read-only': { type: 'boolean' },
       db: { type: 'string' },
     },
   });
 
   const store = new Store(values.db);
   const staticDir = resolveUiDir();
-  const server = await startUiServer({ store, port: parseId(values.port, '--port'), staticDir }).catch((error: NodeJS.ErrnoException) => {
+  const server = await startUiServer({ store, port: parseId(values.port, '--port'), staticDir, readOnly: values['read-only'] }).catch((error: NodeJS.ErrnoException) => {
     if (error.code === 'EADDRINUSE') fail(`port ${values.port} is in use; pick another with --port`);
     throw error;
   });

@@ -268,13 +268,31 @@ code,
   font-size: 11px;
 }
 
+.session-tag {
+  padding: 0 6px;
+  border-radius: 4px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 10.5px;
+  font-weight: 500;
+}
+
 .session-meta {
   color: var(--muted);
   font-size: 11.5px;
   padding-left: 14px;
 }
 
-.session:first-of-type .session-meta {
+.session:first-of-type .session-tag {
+  padding: 0 6px;
+  border-radius: 4px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 10.5px;
+  font-weight: 500;
+}
+
+.session-meta {
   padding-left: 0;
 }
 
@@ -719,12 +737,19 @@ td {
   color: var(--muted);
 }
 
+.status-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+}
+
 .compare-hint {
-  margin-left: auto;
   display: inline-flex;
+  align-items: center;
   gap: 8px;
   padding: 3px 10px;
-  margin-bottom: 4px;
   border-radius: 999px;
   background: var(--accent-soft);
   color: var(--accent);
@@ -931,4 +956,82 @@ table.stats .num {
 .diff-delete .diff-sign,
 .diff-delete .diff-text {
   color: var(--error);
+}
+
+/* Replay */
+
+.replay-label {
+  display: block;
+  margin-bottom: 4px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.replay-editor {
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text);
+  resize: vertical;
+  line-height: 1.5;
+}
+
+.replay-editor:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: -1px;
+}
+
+.replay-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 14px;
+  margin-top: 10px;
+}
+
+.replay-repeat {
+  margin-right: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+}
+
+.replay-repeat input {
+  width: 56px;
+  padding: 3px 6px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+}
+
+.primary-button {
+  padding: 6px 14px;
+  border: 0;
+  border-radius: 6px;
+  background: var(--accent);
+  color: #fff;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.primary-button:disabled,
+.text-button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.notice {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 10px;
+  border-radius: 999px;
+  background: var(--ok-soft);
+  color: var(--ok);
+  font-size: 12px;
 }

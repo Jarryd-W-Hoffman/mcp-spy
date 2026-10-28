@@ -4,6 +4,7 @@ import type { AddressInfo } from 'node:net';
 import { extname, join, normalize, resolve, sep } from 'node:path';
 import { toSummary, type MessageDetail, type ServerEvent } from './api.js';
 import { backfillTokens } from './recorder.js';
+import { replay, ReplayError } from './replay.js';
 import { toolsReport } from './report.js';
 import type { Store } from './store.js';
 
@@ -15,6 +16,8 @@ export interface UiServerOptions {
   staticDir: string | null;
   /** How often to look for new messages, in ms. */
   pollInterval?: number;
+  /** Disables replay, so the UI can only read. */
+  readOnly?: boolean;
 }
 
 export interface UiServer {
@@ -82,12 +85,60 @@ export async function startUiServer(options: UiServerOptions): Promise<UiServer>
     }
   });
 
+  /**
+   * Replay starts processes and sends them arbitrary arguments, so beyond the
+   * Host check it must be impossible to trigger from another site: browsers
+   * can't send the custom header or a JSON content type cross-origin without
+   * a CORS preflight, which this server never approves.
+   */
+  async function handleReplay(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    if (options.readOnly) {
+      json(res, 403, { error: 'replay is disabled (mcpspy ui --read-only)' });
+      return;
+    }
+    const origin = req.headers.origin;
+    const fetchSite = req.headers['sec-fetch-site'];
+    if (
+      req.headers['x-mcpspy'] !== '1' ||
+      !req.headers['content-type']?.startsWith('application/json') ||
+      (origin !== undefined && !isLoopbackOrigin(origin, (server.address() as AddressInfo).port)) ||
+      (fetchSite !== undefined && fetchSite !== 'same-origin' && fetchSite !== 'none')
+    ) {
+      json(res, 403, { error: 'replay requests must come from the mcpspy UI' });
+      return;
+    }
+
+    let body: { messageId?: unknown; params?: unknown; repeat?: unknown };
+    try {
+      body = JSON.parse(await readBody(req, 1024 * 1024)) as typeof body;
+    } catch (error) {
+      json(res, 400, { error: `bad request body: ${(error as Error).message}` });
+      return;
+    }
+    if (typeof body.messageId !== 'number') {
+      json(res, 400, { error: 'messageId is required' });
+      return;
+    }
+    const repeat = typeof body.repeat === 'number' ? Math.min(Math.max(1, Math.floor(body.repeat)), 100) : 1;
+
+    try {
+      json(res, 200, await replay({ store, messageId: body.messageId, params: body.params, repeat }));
+    } catch (error) {
+      const sessionId = error instanceof ReplayError ? error.sessionId : null;
+      json(res, error instanceof ReplayError ? 422 : 500, { error: (error as Error).message, sessionId });
+    }
+  }
+
   function handle(req: IncomingMessage, res: ServerResponse): void {
     if (!isLoopbackHost(req.headers.host)) {
       json(res, 403, { error: 'mcpspy only answers requests addressed to localhost' });
       return;
     }
     const url = new URL(req.url ?? '/', 'http://localhost');
+    if (req.method === 'POST' && url.pathname === '/api/replay') {
+      void handleReplay(req, res);
+      return;
+    }
     if (req.method !== 'GET') {
       json(res, 405, { error: 'method not allowed' });
       return;
@@ -210,6 +261,33 @@ function optionalInt(value: string | null): number | undefined {
   if (value === null || value === '') return undefined;
   const parsed = Number.parseInt(value, 10);
   return Number.isSafeInteger(parsed) ? parsed : undefined;
+}
+
+function isLoopbackOrigin(origin: string, port: number): boolean {
+  try {
+    const url = new URL(origin);
+    return url.protocol === 'http:' && isLoopbackHost(url.host) && Number(url.port || 80) === port;
+  } catch {
+    return false;
+  }
+}
+
+function readBody(req: IncomingMessage, limit: number): Promise<string> {
+  return new Promise((resolvePromise, reject) => {
+    const chunks: Buffer[] = [];
+    let size = 0;
+    req.on('data', (chunk: Buffer) => {
+      size += chunk.length;
+      if (size > limit) {
+        reject(new Error('body too large'));
+        req.destroy();
+        return;
+      }
+      chunks.push(chunk);
+    });
+    req.on('end', () => resolvePromise(Buffer.concat(chunks).toString('utf8')));
+    req.on('error', reject);
+  });
 }
 
 export function isLoopbackHost(host: string | undefined): boolean {

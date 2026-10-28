@@ -5,6 +5,7 @@ import type { Exchange } from '../exchanges';
 import { formatBytes, formatClock, formatDuration } from '../format';
 import { formatTokens } from '../../../src/tokens.js';
 import { DiffView } from './DiffView';
+import { ReplayPanel, type ReplayOutcome } from './ReplayPanel';
 import { JsonTree, type Json } from './JsonTree';
 
 type View = 'tree' | 'raw';
@@ -15,10 +16,12 @@ interface Props {
   /** Exchange (or message) this one is being compared with, if any. */
   compareBase: number | null;
   onCompareBase(id: number | null): void;
+  onReplayed(outcome: ReplayOutcome): void;
   onClose(): void;
 }
 
-export function DetailPane({ exchange, sessionName, compareBase, onCompareBase, onClose }: Props) {
+export function DetailPane({ exchange, sessionName, compareBase, onCompareBase, onReplayed, onClose }: Props) {
+  const [replaying, setReplaying] = useState(false);
   const [detail, setDetail] = useState<MessageDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [view, setView] = useState<View>('tree');
@@ -26,6 +29,8 @@ export function DetailPane({ exchange, sessionName, compareBase, onCompareBase, 
   const comparing = compareBase !== null && compareBase !== exchange.id;
   const tokens = exchange.response?.tokens ?? exchange.primary.tokens;
   const responseId = exchange.response?.id;
+
+  useEffect(() => setReplaying(false), [exchange.id]);
 
   // Refetch when the response for a pending request arrives.
   useEffect(() => {
@@ -65,6 +70,11 @@ export function DetailPane({ exchange, sessionName, compareBase, onCompareBase, 
           </p>
         </div>
         <div className="detail-actions">
+          {canReplay(primary) && !replaying && !(comparing && showDiff) && (
+            <button className="text-button" onClick={() => setReplaying(true)} title="Run this request again against a fresh server">
+              Replay…
+            </button>
+          )}
           {comparing ? (
             <div className="segmented" role="group" aria-label="Show">
               <button className={showDiff ? 'is-on' : ''} onClick={() => setShowDiff(true)}>
@@ -102,7 +112,9 @@ export function DetailPane({ exchange, sessionName, compareBase, onCompareBase, 
       </header>
 
       <div className="detail-body">
-        {comparing && showDiff ? (
+        {replaying && current?.request ? (
+          <ReplayPanel request={current.request} onDone={onReplayed} onCancel={() => setReplaying(false)} />
+        ) : comparing && showDiff ? (
           <DiffView baseId={compareBase} targetId={exchange.id} />
         ) : (
           <>
@@ -115,6 +127,10 @@ export function DetailPane({ exchange, sessionName, compareBase, onCompareBase, 
       </div>
     </aside>
   );
+}
+
+function canReplay(message: Exchange['primary']): boolean {
+  return message.kind === 'request' && message.direction === 'client' && message.method !== 'initialize';
 }
 
 function Sections({ detail, view }: { detail: MessageDetail; view: View }) {
