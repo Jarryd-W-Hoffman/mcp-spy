@@ -85,12 +85,16 @@ export async function replay(options: ReplayOptions): Promise<ReplayResult> {
     env_keys: JSON.stringify(Object.keys(env).sort()),
   });
 
+  const recorder = new Recorder(store, sessionId);
+  const toolList = store.latestReply(originSessionId, 'tools/list');
+  if (toolList) recorder.useToolList(toolList.payload);
+
   const client = new StdioRpcClient({
     command,
     args,
     cwd: session.cwd,
     env,
-    recorder: new Recorder(store, sessionId),
+    recorder,
     onServerRequest: (method) => recordedClientReply(store, originSessionId, method),
   });
   if (client.pid !== undefined) store.setSessionPid(sessionId, client.pid);

@@ -3,7 +3,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import type { AddressInfo } from 'node:net';
 import { extname, join, normalize, resolve, sep } from 'node:path';
 import { toSummary, type MessageDetail, type ServerEvent } from './api.js';
-import { backfillTokens } from './recorder.js';
+import { backfillTokens, backfillValidation } from './recorder.js';
 import { replay, ReplayError } from './replay.js';
 import { toolsReport } from './report.js';
 import type { Store } from './store.js';
@@ -44,6 +44,7 @@ const CONTENT_TYPES: Record<string, string> = {
 export async function startUiServer(options: UiServerOptions): Promise<UiServer> {
   const { store, host = '127.0.0.1', staticDir, pollInterval = 250 } = options;
   backfillTokens(store);
+  backfillValidation(store);
   const clients = new Set<{ res: ServerResponse; sessionId: number | undefined }>();
 
   const send = (res: ServerResponse, event: ServerEvent) => {

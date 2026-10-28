@@ -38,6 +38,20 @@ describe('replay', () => {
     ]);
   });
 
+  it("validates replayed calls against the original session's tool list", async () => {
+    const recorded = await recordSession(store);
+    // recordSession never lists tools, so record a list in the original session first.
+    store.insertMessage({
+      session_id: recorded.sessionId, ts: 0, direction: 'server', kind: 'response', method: 'tools/list', rpc_id: '99',
+      payload: JSON.stringify({ jsonrpc: '2.0', id: 99, result: { tools: [{ name: 'echo', inputSchema: { type: 'object', properties: { text: { type: 'string' } }, required: ['text'] } }] } }),
+      size: 0, problem: null, request_id: null, latency_ms: null, tokens: null, token_detail: null, issues: null,
+    });
+    const result = await replay({ store, messageId: recorded.echo, params: { name: 'echo', arguments: { text: 5 } } });
+    expect(JSON.parse(store.getMessage(result.runs[0]!.requestId!)!.issues!)).toEqual([
+      { severity: 'error', path: 'params.arguments.text', message: 'must be string' },
+    ]);
+  });
+
   it("answers the server's requests with the agent's recorded replies", async () => {
     const recorded = await recordSession(store);
     const result = await replay({ store, messageId: recorded.roots });

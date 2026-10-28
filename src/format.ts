@@ -109,6 +109,8 @@ export function formatMessageLine(
   const what = [message.method ?? '', subject ? style.magenta(subject) : ''].filter(Boolean).join(' ');
   const id = message.rpc_id !== null ? style.dim(`id=${message.rpc_id}`) : '';
   const size = style.dim(formatBytes(message.size));
+  const issueCount = message.issues ? (JSON.parse(message.issues) as unknown[]).length : 0;
+  const issues = issueCount > 0 ? style.yellow(`⚠ ${issueCount} issue${issueCount === 1 ? '' : 's'}`) : '';
 
   switch (message.kind) {
     case 'log':
@@ -117,7 +119,7 @@ export function formatMessageLine(
       return `${prefix} ${arrow(message, style)} ${style.yellow('invalid')} ${message.problem ?? ''} ${style.dim(truncate(message.payload, 80))}`;
     case 'request':
     case 'notification':
-      return [prefix, arrow(message, style), message.kind === 'notification' ? style.dim(what) : what, id, size]
+      return [prefix, arrow(message, style), message.kind === 'notification' ? style.dim(what) : what, issues, id, size]
         .filter(Boolean)
         .join(' ');
     case 'response':
@@ -126,7 +128,7 @@ export function formatMessageLine(
       const status = failure ? style.red(`✗ ${truncate(failure, 80)}`) : style.green('✓');
       const latency = message.latency_ms !== null ? formatDuration(message.latency_ms) : style.yellow('unmatched');
       const tokens = message.tokens ? style.yellow(`≈${formatTokens(message.tokens)} tok`) : '';
-      return [prefix, arrow(message, style), what, status, latency, tokens, id, size].filter(Boolean).join(' ');
+      return [prefix, arrow(message, style), what, status, issues, latency, tokens, id, size].filter(Boolean).join(' ');
     }
   }
 }

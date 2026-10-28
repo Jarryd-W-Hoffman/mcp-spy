@@ -26,6 +26,18 @@ export class Recorder {
     private readonly now: () => number = () => performance.timeOrigin + performance.now(),
   ) {}
 
+  /**
+   * Validates later traffic against a tool list seen elsewhere, e.g. the
+   * original session's when replaying (replays skip tools/list).
+   */
+  useToolList(responsePayload: string): void {
+    try {
+      this.validator.toolList((JSON.parse(responsePayload) as { result?: unknown }).result);
+    } catch {
+      // A malformed list was already reported where it was recorded.
+    }
+  }
+
   /** Records one stdio frame sent by the client or the server. */
   frame(direction: 'client' | 'server', line: string): number[] {
     const ts = this.now();

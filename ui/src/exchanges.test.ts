@@ -25,7 +25,7 @@ function message(overrides: Partial<MessageSummary>): MessageSummary {
   };
 }
 
-const allVisible: ExchangeFilter = { sessionId: null, search: '', showNotifications: true, showLogs: true, errorsOnly: false };
+const allVisible: ExchangeFilter = { sessionId: null, search: '', showNotifications: true, showLogs: true, errorsOnly: false, issuesOnly: false };
 
 describe('buildExchanges', () => {
   it('folds responses into their request', () => {
@@ -54,6 +54,18 @@ describe('buildExchanges', () => {
       ['log', 'none'],
       ['response', 'ok'],
     ]);
+  });
+});
+
+describe('exchange issues', () => {
+  it('collects issues from the request and its response, and filters on them', () => {
+    const issue = { severity: 'error' as const, path: 'params.arguments', message: 'x' };
+    const request = message({ issues: [issue] });
+    const response = message({ direction: 'server', kind: 'response', request_id: request.id, issues: [{ ...issue, path: 'result' }] });
+    const clean = message({ rpc_id: '9' });
+    const rows = buildExchanges([request, response, clean]);
+    expect(rows[0]!.issues.map((i) => i.path)).toEqual(['params.arguments', 'result']);
+    expect(filterExchanges(rows, { ...allVisible, issuesOnly: true }).map((e) => e.id)).toEqual([request.id]);
   });
 });
 

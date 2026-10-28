@@ -16,13 +16,14 @@ import {
   type Style,
 } from './format.js';
 import { runStdioProxy } from './proxy/stdio.js';
-import { backfillTokens } from './recorder.js';
+import { backfillTokens, backfillValidation } from './recorder.js';
 import { replay, ReplayError, withArguments, type ReplayResult } from './replay.js';
 import { toolsReport } from './report.js';
 import { startUiServer } from './server.js';
 import { addCases, emptySuite, parseSuite, runSuite, updateExpectations, type Suite } from './suite.js';
 import { formatTokens } from './tokens.js';
 import { defaultDbPath, Store, type MessageRow, type SessionRow } from './store.js';
+import type { Issue } from './types.js';
 
 const HELP = `mcpspy - see what your AI agent and its MCP servers say to each other
 
@@ -38,6 +39,7 @@ Usage:
   mcpspy replay <message-id> [--args <json> | --params <json>] [--repeat <n>] [-e KEY=VALUE]... [--json]
   mcpspy suite add <file> <message-id>... [--name <case name>]
   mcpspy suite run <file> [--update] [--only <text>] [--json]
+  mcpspy validate [--session <id>] [--db <path>]
 
 Wrap a stdio MCP server by putting mcpspy in front of its command in your
 agent's MCP config, e.g. in .mcp.json:
@@ -93,6 +95,8 @@ async function main(argv: string[]): Promise<void> {
       return replayCommand(rest);
     case 'suite':
       return suiteCommand(rest);
+    case 'validate':
+      return validate(rest);
     default:
       fail(`unknown command "${first}". Run mcpspy --help.`);
   }
@@ -133,6 +137,7 @@ async function tail(argv: string[]): Promise<void> {
   const sessionId = values.session !== undefined ? parseId(values.session, '--session') : undefined;
 
   const store = new Store(values.db);
+  backfillValidation(store);
   const style = styleFor(process.stdout);
   const sessionCache = new Map<number, SessionRow | undefined>();
   const subjectCache = new Map<number, string | null>();
@@ -636,6 +641,48 @@ async function suiteCommand(argv: string[]): Promise<void> {
     );
   }
   if (counts.fail > 0 || counts.error > 0) process.exitCode = 1;
+}
+
+function validate(argv: string[]): void {
+  const { values } = parseArgs({ args: argv, options: { session: { type: 'string' }, db: { type: 'string' } } });
+  const store = new Store(values.db);
+  const style = styleFor(process.stdout);
+  backfillValidation(store);
+  const sessionId = values.session !== undefined ? parseId(values.session, '--session') : undefined;
+  const messages = store.messagesWithIssues(sessionId, 10_000).reverse();
+  const sessions = new Map<number, SessionRow | undefined>();
+  const requests = new Map<number, MessageRow | undefined>();
+  const out = (line = '') => process.stdout.write(`${line}\n`);
+
+  let errors = 0;
+  let warnings = 0;
+  for (const message of messages) {
+    if (!sessions.has(message.session_id)) sessions.set(message.session_id, store.getSession(message.session_id));
+    if (message.request_id !== null && !requests.has(message.request_id)) requests.set(message.request_id, store.getMessage(message.request_id));
+    const session = sessions.get(message.session_id);
+    const request = message.request_id !== null ? requests.get(message.request_id) : message;
+    const subject = request ? requestSubject(request.method, request.payload) : null;
+    const what = message.direction === 'client' ? 'request' : 'response';
+
+    out(
+      `${style.cyan(`${session?.name ?? 'session'} #${message.session_id}`)}  ${[message.method, subject].filter(Boolean).join(' ')} ${what} ${style.dim(`#${message.id}`)}`,
+    );
+    for (const issue of JSON.parse(message.issues!) as Issue[]) {
+      if (issue.severity === 'error') errors++;
+      else warnings++;
+      const label = issue.severity === 'error' ? style.red('error  ') : style.yellow('warning');
+      out(`  ${label}  ${style.yellow(issue.path)}  ${issue.message}`);
+    }
+  }
+  store.close();
+
+  if (messages.length === 0) {
+    out(style.green('No schema or protocol issues found.'));
+    return;
+  }
+  out();
+  out(`${errors} error${errors === 1 ? '' : 's'}, ${warnings} warning${warnings === 1 ? '' : 's'} in ${messages.length} message${messages.length === 1 ? '' : 's'}`);
+  if (errors > 0) process.exitCode = 1;
 }
 
 async function ui(argv: string[]): Promise<void> {

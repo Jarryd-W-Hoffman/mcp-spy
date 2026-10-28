@@ -120,12 +120,30 @@ export function DetailPane({ exchange, sessionName, compareBase, onCompareBase, 
           <>
             {error && <p className="detail-error">Couldn't load message: {error}</p>}
             {failure && <p className="detail-failure mono">{failure}</p>}
+            {exchange.issues.length > 0 && <IssueList issues={exchange.issues} />}
             {!current && !error && <p className="muted">Loading…</p>}
             {current && <Sections detail={current} view={view} />}
           </>
         )}
       </div>
     </aside>
+  );
+}
+
+function IssueList({ issues }: { issues: Exchange['issues'] }) {
+  return (
+    <div className="issues">
+      <h3 className="section-label">Schema issues</h3>
+      <ul>
+        {issues.map((issue, index) => (
+          <li key={index} className={`issue issue-${issue.severity}`}>
+            <span className="issue-severity">{issue.severity}</span>
+            <span className="mono issue-path">{issue.path}</span>
+            <span>{issue.message}</span>
+          </li>
+        ))}
+      </ul>
+    </div>
   );
 }
 

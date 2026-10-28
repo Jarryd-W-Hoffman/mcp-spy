@@ -15,6 +15,7 @@ export function App() {
     showNotifications: true,
     showLogs: true,
     errorsOnly: false,
+    issuesOnly: false,
   });
   const [selected, setSelected] = useState<number | null>(null);
   const [compareBase, setCompareBase] = useState<number | null>(null);
@@ -26,6 +27,7 @@ export function App() {
   const sessionsById = useMemo(() => new Map(sessions.map((session) => [session.id, session])), [sessions]);
   const selectedExchange = exchanges.find((exchange) => exchange.id === selected) ?? null;
   const errorCount = useMemo(() => visible.filter((exchange) => exchange.status === 'error').length, [visible]);
+  const issueCount = useMemo(() => visible.filter((exchange) => exchange.issues.length > 0).length, [visible]);
 
   // The Tools tab describes one session: the selected one, else the newest.
   const toolsSession = filter.sessionId !== null ? sessionsById.get(filter.sessionId) : sessions[0];
@@ -97,6 +99,7 @@ export function App() {
           <Toggle label="Notifications" checked={filter.showNotifications} onChange={(value) => update({ showNotifications: value })} />
           <Toggle label="stderr" checked={filter.showLogs} onChange={(value) => update({ showLogs: value })} />
           <Toggle label={`Errors only${errorCount ? ` (${errorCount})` : ''}`} checked={filter.errorsOnly} onChange={(value) => update({ errorsOnly: value })} />
+          <Toggle label={`Schema issues${issueCount ? ` (${issueCount})` : ''}`} checked={filter.issuesOnly} onChange={(value) => update({ issuesOnly: value })} />
         </div>
         <span className={`connection connection-${connection}`}>
           <span className="dot" aria-hidden />

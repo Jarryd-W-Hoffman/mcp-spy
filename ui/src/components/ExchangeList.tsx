@@ -106,6 +106,11 @@ function Row({
       </td>
       <td className="col-status">
         <StatusBadge exchange={exchange} />
+        {exchange.issues.length > 0 && (
+          <span className="badge badge-issue" title={exchange.issues.map((issue) => `${issue.path}: ${issue.message}`).join('\n')}>
+            ⚠ {exchange.issues.length}
+          </span>
+        )}
       </td>
       <td className="col-num mono">{latency !== null ? formatDuration(latency) : ''}</td>
       <td className="col-num mono">{tokens ? `≈${formatTokens(tokens)}` : ''}</td>

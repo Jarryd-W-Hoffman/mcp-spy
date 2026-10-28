@@ -71,6 +71,11 @@ describe('formatMessageLine', () => {
     );
   });
 
+  it('counts schema issues', () => {
+    const bad = row({ issues: JSON.stringify([{ severity: 'error', path: 'params.arguments', message: 'x' }]) });
+    expect(formatMessageLine(bad, session, 'search', plain)).toBe('09:05:07.042 github     #5 → tools/call search ⚠ 1 issue id=3 120B');
+  });
+
   it('formats stderr lines', () => {
     const log = row({ direction: 'stderr', kind: 'log', method: null, rpc_id: null, payload: 'listening' });
     expect(formatMessageLine(log, session, null, plain)).toBe('09:05:07.042 github     #5 stderr listening');
