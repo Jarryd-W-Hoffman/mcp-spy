@@ -4,9 +4,20 @@ import { existsSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { comparableBody, diffLines, hunks, jsonLines } from './diff.js';
-import { formatBytes, formatClock, formatDuration, formatMessageLine, prettyPayload, requestSubject, styleFor } from './format.js';
+import {
+  errorSummary,
+  formatBytes,
+  formatClock,
+  formatDuration,
+  formatMessageLine,
+  prettyPayload,
+  requestSubject,
+  styleFor,
+  type Style,
+} from './format.js';
 import { runStdioProxy } from './proxy/stdio.js';
 import { backfillTokens } from './recorder.js';
+import { replay, ReplayError, withArguments, type ReplayResult } from './replay.js';
 import { toolsReport } from './report.js';
 import { startUiServer } from './server.js';
 import { formatTokens } from './tokens.js';
@@ -23,6 +34,7 @@ Usage:
   mcpspy ui [--port <7777>] [--open] [--db <path>]
   mcpspy tokens [--session <id>] [--exact] [--model <id>] [--db <path>]
   mcpspy diff <message-id> <message-id> [--db <path>]
+  mcpspy replay <message-id> [--args <json> | --params <json>] [--repeat <n>] [-e KEY=VALUE]... [--json]
 
 Wrap a stdio MCP server by putting mcpspy in front of its command in your
 agent's MCP config, e.g. in .mcp.json:
@@ -74,6 +86,8 @@ async function main(argv: string[]): Promise<void> {
       return tokens(rest);
     case 'diff':
       return diff(rest);
+    case 'replay':
+      return replayCommand(rest);
     default:
       fail(`unknown command "${first}". Run mcpspy --help.`);
   }
@@ -405,19 +419,117 @@ function diff(argv: string[]): void {
       process.stdout.write(style.dim('  missing on one side\n\n'));
       continue;
     }
-    const groups = hunks(diffLines(jsonLines(comparableBody(a.payload)), jsonLines(comparableBody(b.payload))));
-    if (groups.length === 0) {
-      process.stdout.write(style.dim('  identical\n\n'));
-      continue;
-    }
-    for (const group of groups) {
-      process.stdout.write(style.dim(`@@ -${group.beforeStart} +${group.afterStart} @@\n`));
-      for (const op of group.ops) {
-        const line = op.type === 'insert' ? style.green(`+${op.text}`) : op.type === 'delete' ? style.red(`-${op.text}`) : ` ${op.text}`;
-        process.stdout.write(`${line}\n`);
-      }
-    }
+    printDiff(comparableBody(a.payload), comparableBody(b.payload), style);
     process.stdout.write('\n');
+  }
+}
+
+/** Prints a unified diff of two JSON values; returns whether they differ. */
+function printDiff(before: unknown, after: unknown, style: Style): boolean {
+  const groups = hunks(diffLines(jsonLines(before), jsonLines(after)));
+  if (groups.length === 0) {
+    process.stdout.write(style.dim('  identical\n'));
+    return false;
+  }
+  for (const group of groups) {
+    process.stdout.write(style.dim(`@@ -${group.beforeStart} +${group.afterStart} @@\n`));
+    for (const op of group.ops) {
+      const line = op.type === 'insert' ? style.green(`+${op.text}`) : op.type === 'delete' ? style.red(`-${op.text}`) : ` ${op.text}`;
+      process.stdout.write(`${line}\n`);
+    }
+  }
+  return true;
+}
+
+async function replayCommand(argv: string[]): Promise<void> {
+  const { values, positionals } = parseArgs({
+    args: argv,
+    allowPositionals: true,
+    options: {
+      args: { type: 'string' },
+      params: { type: 'string' },
+      repeat: { type: 'string', default: '1' },
+      env: { type: 'string', multiple: true, short: 'e' },
+      timeout: { type: 'string', default: '30000' },
+      json: { type: 'boolean' },
+      db: { type: 'string' },
+    },
+  });
+  if (positionals.length !== 1) fail('replay takes one message id (a request from the agent)');
+  if (values.args !== undefined && values.params !== undefined) fail('use either --args or --params, not both');
+  const repeat = parseId(values.repeat, '--repeat');
+  if (repeat < 1) fail('--repeat must be at least 1');
+
+  const env: Record<string, string> = {};
+  for (const pair of values.env ?? []) {
+    const index = pair.indexOf('=');
+    if (index <= 0) fail(`--env expects KEY=VALUE, got "${pair}"`);
+    env[pair.slice(0, index)] = pair.slice(index + 1);
+  }
+  const parseJson = (text: string, flag: string): unknown => {
+    try {
+      return JSON.parse(text);
+    } catch (error) {
+      fail(`${flag} is not valid JSON: ${(error as Error).message}`);
+    }
+  };
+
+  const store = new Store(values.db);
+  const style = styleFor(process.stdout);
+  const messageId = parseId(positionals[0]!, 'message id');
+  const request = store.getMessage(messageId);
+  let params: unknown;
+  if (values.params !== undefined) params = parseJson(values.params, '--params');
+  if (values.args !== undefined && request) params = withArguments(request, parseJson(values.args, '--args'));
+
+  let result: ReplayResult;
+  try {
+    result = await replay({ store, messageId, params, repeat, env, timeoutMs: parseId(values.timeout, '--timeout') });
+  } catch (error) {
+    store.close();
+    if (error instanceof ReplayError) {
+      const recorded = error.sessionId !== null ? ` (recorded as session #${error.sessionId})` : '';
+      process.stderr.write(`mcpspy: replay failed${recorded}: ${error.message}\n`);
+      process.exit(1);
+    }
+    throw error;
+  }
+  const original = result.original.responseId !== null ? store.getMessage(result.original.responseId) : undefined;
+  const session = store.getSession(store.getMessage(messageId)!.session_id)!;
+  store.close();
+
+  if (values.json) {
+    process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+    return;
+  }
+
+  const subject = request ? requestSubject(request.method, request.payload) : null;
+  const out = (line = '') => process.stdout.write(`${line}\n`);
+  out(
+    `Replayed ${[result.original.method, subject].filter(Boolean).join(' ')} ${style.dim(`(#${messageId} from ${session.name ?? 'session'} #${session.id})`)} → session #${result.sessionId}`,
+  );
+  out(style.dim(`  startup ${formatDuration(result.startupMs)} (spawn + initialize)`));
+  for (const [index, run] of result.runs.entries()) {
+    const failure = errorSummary({ payload: JSON.stringify(run.response) } as MessageRow);
+    out(`  run ${index + 1}  ${failure ? style.red(`✗ ${failure}`) : style.green('✓')} ${formatDuration(run.latencyMs)}  ${style.dim(`#${run.responseId}`)}`);
+  }
+  if (result.runs.length > 2) {
+    const sorted = result.runs.map((run) => run.latencyMs).sort((a, b) => a - b);
+    const median = sorted[Math.floor(sorted.length / 2)]!;
+    out(style.dim(`  latency min ${formatDuration(sorted[0]!)} · median ${formatDuration(median)} · max ${formatDuration(sorted.at(-1)!)}`));
+  }
+  if (result.missingEnv.length > 0) {
+    out(style.yellow(`  The original server had ${result.missingEnv.join(', ')} set, which isn't set now. Pass --env NAME=value or export it.`));
+  }
+
+  const last = result.runs.at(-1)!;
+  out();
+  if (original) {
+    out(`Response vs original #${original.id}:`);
+    printDiff(comparableBody(original.payload), comparableBody(JSON.stringify(last.response)), style);
+  } else {
+    out('Response (the original had none):');
+    out(prettyPayload(JSON.stringify(last.response)));
   }
 }
 
