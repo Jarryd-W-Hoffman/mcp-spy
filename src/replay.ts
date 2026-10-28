@@ -65,7 +65,7 @@ export async function replay(options: ReplayOptions): Promise<ReplayResult> {
   }
   if (request.method === 'initialize') throw new ReplayError('initialize is sent automatically; replay a later request');
   const session = store.getSession(request.session_id)!;
-  if (session.transport !== 'stdio' && session.transport !== 'replay') {
+  if (session.transport !== 'stdio' && session.transport !== 'replay' && session.transport !== 'mock') {
     throw new ReplayError(`replaying ${session.transport} sessions is not supported yet`);
   }
 

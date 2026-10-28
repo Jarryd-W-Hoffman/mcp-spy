@@ -33,6 +33,7 @@ export function SessionList({ sessions, selected, onSelect }: Props) {
               {session.name ?? command.split(' ')[0]}
               <span className="session-id">#{session.id}</span>
               {session.replay_of !== null && <span className="session-tag">replay of #{session.replay_of}</span>}
+              {session.transport === 'mock' && <span className="session-tag">mock server</span>}
             </span>
             <span className="session-meta">
               {session.message_count} messages · {running ? 'running' : failed ? (session.exit_signal ?? `exit ${session.exit_code}`) : 'exited'} ·{' '}

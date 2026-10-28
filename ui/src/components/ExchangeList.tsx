@@ -106,6 +106,11 @@ function Row({
       </td>
       <td className="col-status">
         <StatusBadge exchange={exchange} />
+        {exchange.response?.mock && (
+          <span className="badge badge-mock" title={`Answered by mock rule "${exchange.response.mock}"`}>
+            mock
+          </span>
+        )}
         {exchange.issues.length > 0 && (
           <span className="badge badge-issue" title={exchange.issues.map((issue) => `${issue.path}: ${issue.message}`).join('\n')}>
             ⚠ {exchange.issues.length}

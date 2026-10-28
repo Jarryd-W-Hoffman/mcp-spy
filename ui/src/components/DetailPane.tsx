@@ -120,6 +120,11 @@ export function DetailPane({ exchange, sessionName, compareBase, onCompareBase, 
           <>
             {error && <p className="detail-error">Couldn't load message: {error}</p>}
             {failure && <p className="detail-failure mono">{failure}</p>}
+            {exchange.response?.mock && (
+              <p className="detail-mock">
+                Response from mock rule <strong>{exchange.response.mock}</strong>
+              </p>
+            )}
             {exchange.issues.length > 0 && <IssueList issues={exchange.issues} />}
             {!current && !error && <p className="muted">Loading…</p>}
             {current && <Sections detail={current} view={view} />}

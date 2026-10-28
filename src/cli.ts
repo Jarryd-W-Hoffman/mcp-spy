@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { spawn } from 'node:child_process';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { comparableBody, diffLines, hunks, jsonLines } from './diff.js';
@@ -15,7 +16,10 @@ import {
   styleFor,
   type Style,
 } from './format.js';
+import { MockEngine, parseMockFile, rulesFromRecording, type MockFile, type MockTool } from './mocks.js';
+import { runMockServer } from './proxy/mock-server.js';
 import { runStdioProxy } from './proxy/stdio.js';
+import { calledTool } from './validate.js';
 import { backfillTokens, backfillValidation } from './recorder.js';
 import { replay, ReplayError, withArguments, type ReplayResult } from './replay.js';
 import { toolsReport } from './report.js';
@@ -28,7 +32,7 @@ import type { Issue } from './types.js';
 const HELP = `mcpspy - see what your AI agent and its MCP servers say to each other
 
 Usage:
-  mcpspy run [--name <label>] [--db <path>] -- <command> [args...]
+  mcpspy run [--name <label>] [--mocks <file>] [--db <path>] -- <command> [args...]
   mcpspy -- <command> [args...]            shorthand for run
   mcpspy tail [-f] [-n <count>] [--session <id>] [--json] [--db <path>]
   mcpspy sessions [--limit <n>] [--db <path>]
@@ -40,6 +44,8 @@ Usage:
   mcpspy suite add <file> <message-id>... [--name <case name>]
   mcpspy suite run <file> [--update] [--only <text>] [--json]
   mcpspy validate [--session <id>] [--db <path>]
+  mcpspy mock serve <file> [--name <label>]  a fake MCP server driven by mock rules
+  mcpspy mock add <file> <message-id>...     turn recorded calls into mock rules
 
 Wrap a stdio MCP server by putting mcpspy in front of its command in your
 agent's MCP config, e.g. in .mcp.json:
@@ -97,6 +103,8 @@ async function main(argv: string[]): Promise<void> {
       return suiteCommand(rest);
     case 'validate':
       return validate(rest);
+    case 'mock':
+      return mockCommand(rest);
     default:
       fail(`unknown command "${first}". Run mcpspy --help.`);
   }
@@ -108,17 +116,86 @@ async function run(argv: string[]): Promise<void> {
 
   const { values } = parseArgs({
     args: argv.slice(0, separator),
-    options: { name: { type: 'string' }, db: { type: 'string' } },
+    options: { name: { type: 'string' }, mocks: { type: 'string' }, db: { type: 'string' } },
   });
   const [command, ...args] = argv.slice(separator + 1) as [string, ...string[]];
 
+  const mocks = values.mocks !== undefined ? loadMocks(values.mocks, values.name ?? null) : undefined;
   const store = new Store(values.db);
-  const { exitCode } = await runStdioProxy({ command, args, store, name: values.name ?? null });
+  const { exitCode } = await runStdioProxy({ command, args, store, name: values.name ?? null, mocks });
   store.close();
 
   // stdin may still be open (the agent closed nothing); don't let it hold us up.
   process.stdin.destroy();
   process.exitCode = exitCode;
+}
+
+function loadMocks(path: string, serverName: string | null): MockEngine {
+  try {
+    return new MockEngine(resolve(path), serverName, (message) => process.stderr.write(`[mcpspy] ${message}\n`));
+  } catch (error) {
+    fail((error as Error).message);
+  }
+}
+
+async function mockCommand(argv: string[]): Promise<void> {
+  const [sub, ...rest] = argv;
+  if (sub === 'serve') {
+    const { values, positionals } = parseArgs({ args: rest, allowPositionals: true, options: { name: { type: 'string' }, db: { type: 'string' } } });
+    if (positionals.length !== 1) fail('mock serve needs a mock file');
+    const path = resolve(positionals[0]!);
+    const mocks = loadMocks(path, values.name ?? null);
+    const store = new Store(values.db);
+    await runMockServer({ mocks, path, store, name: values.name ?? null });
+    store.close();
+    return;
+  }
+  if (sub === 'add') {
+    const { values, positionals } = parseArgs({ args: rest, allowPositionals: true, options: { db: { type: 'string' } } });
+    const [file, ...ids] = positionals;
+    if (!file || ids.length === 0) fail('mock add needs a mock file and at least one message id');
+    const existing: MockFile = existsSync(file) ? parseMockFileOrFail(file) : { tools: [], rules: [] };
+    const tools = existing.tools ?? [];
+    const rules = existing.rules ?? [];
+
+    const store = new Store(values.db);
+    for (const raw of ids) {
+      const picked = store.getMessage(parseId(raw, 'message id'));
+      if (!picked) fail(`no message #${raw}`);
+      const request = picked.direction === 'server' && picked.request_id !== null ? store.getMessage(picked.request_id) : picked;
+      if (!request || request.direction !== 'client' || request.kind !== 'request' || request.method === null) {
+        fail(`#${raw} is not a client request or a response to one`);
+      }
+      const response = store.responseTo(request.id);
+      const toolName = request.method === 'tools/call' ? calledTool(request.payload) : null;
+      const definition = toolName !== null ? recordedTool(store, request.session_id, toolName) : undefined;
+      const { rule, tool } = rulesFromRecording({ id: request.id, method: request.method, payload: request.payload }, response, definition);
+      rules.push(rule);
+      if (tool && !tools.some((known) => known.name === tool.name)) tools.push(tool);
+      process.stdout.write(`added rule "${rule.name}"\n`);
+    }
+    store.close();
+    writeFileSync(file, `${JSON.stringify({ ...existing, tools, rules }, null, 2)}\n`);
+    process.stdout.write(`wrote ${file}\n`);
+    return;
+  }
+  fail('usage: mcpspy mock serve <file> | mcpspy mock add <file> <message-id>...');
+}
+
+function parseMockFileOrFail(path: string): MockFile {
+  try {
+    return parseMockFile(readFileSync(path, 'utf8'));
+  } catch (error) {
+    fail(`${path}: ${(error as Error).message}`);
+  }
+}
+
+/** The definition of a tool from the latest tools/list in a session. */
+function recordedTool(store: Store, sessionId: number, name: string): MockTool | undefined {
+  const list = store.latestReply(sessionId, 'tools/list');
+  if (!list) return undefined;
+  const tools = (JSON.parse(list.payload) as { result?: { tools?: MockTool[] } }).result?.tools ?? [];
+  return tools.find((tool) => tool.name === name);
 }
 
 async function tail(argv: string[]): Promise<void> {

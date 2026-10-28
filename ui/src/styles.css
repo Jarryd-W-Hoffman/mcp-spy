@@ -1085,3 +1085,17 @@ table.stats .num {
 .issue-path {
   color: var(--warn);
 }
+
+/* Mocks */
+
+.badge-mock {
+  margin-left: 4px;
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.detail-mock {
+  margin: 10px 0 0;
+  font-size: 12px;
+  color: var(--accent);
+}

@@ -111,6 +111,7 @@ export function formatMessageLine(
   const size = style.dim(formatBytes(message.size));
   const issueCount = message.issues ? (JSON.parse(message.issues) as unknown[]).length : 0;
   const issues = issueCount > 0 ? style.yellow(`⚠ ${issueCount} issue${issueCount === 1 ? '' : 's'}`) : '';
+  const mock = message.mock !== null ? style.magenta(`[mock: ${message.mock}]`) : '';
 
   switch (message.kind) {
     case 'log':
@@ -128,7 +129,7 @@ export function formatMessageLine(
       const status = failure ? style.red(`✗ ${truncate(failure, 80)}`) : style.green('✓');
       const latency = message.latency_ms !== null ? formatDuration(message.latency_ms) : style.yellow('unmatched');
       const tokens = message.tokens ? style.yellow(`≈${formatTokens(message.tokens)} tok`) : '';
-      return [prefix, arrow(message, style), what, status, issues, latency, tokens, id, size].filter(Boolean).join(' ');
+      return [prefix, arrow(message, style), what, status, mock, issues, latency, tokens, id, size].filter(Boolean).join(' ');
     }
   }
 }
