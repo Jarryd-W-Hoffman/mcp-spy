@@ -4,7 +4,7 @@ import type { Readable, Writable } from 'node:stream';
 import { LineSplitter } from '../framing.js';
 import { Recorder } from '../recorder.js';
 import type { MockEngine } from '../mocks.js';
-import type { Store } from '../store.js';
+import { Store } from '../store.js';
 
 export interface StdioProxyOptions {
   command: string;
@@ -37,7 +37,6 @@ export function runStdioProxy(options: StdioProxyOptions): Promise<StdioProxyRes
   const {
     command,
     args,
-    store,
     input = process.stdin,
     output = process.stdout,
     errorOutput = process.stderr,
@@ -45,7 +44,7 @@ export function runStdioProxy(options: StdioProxyOptions): Promise<StdioProxyRes
   } = options;
   const cwd = options.cwd ?? process.cwd();
 
-  const sessionId = store.createSession({
+  const session = {
     name: options.name ?? null,
     transport: 'stdio',
     command: JSON.stringify([command, ...args]),
@@ -54,7 +53,18 @@ export function runStdioProxy(options: StdioProxyOptions): Promise<StdioProxyRes
     started_at: Date.now(),
     // Names only: replay uses them to point out variables that are missing.
     env_keys: JSON.stringify(Object.keys(options.env ?? process.env).sort()),
-  });
+  };
+  // The agent started us to reach its server: if the log can't take this session,
+  // record into memory (and so nowhere) rather than leave the agent without it.
+  let store = options.store;
+  let sessionId: number;
+  try {
+    sessionId = store.createSession(session);
+  } catch (error) {
+    errorOutput.write(`[mcpspy] not recording this session: ${(error as Error).message}\n`);
+    store = new Store(':memory:');
+    sessionId = store.createSession(session);
+  }
   const recorder = new Recorder(store, sessionId);
 
   let recordingBroken = false;

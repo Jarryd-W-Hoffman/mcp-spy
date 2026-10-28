@@ -131,7 +131,14 @@ async function run(argv: string[]): Promise<void> {
   const [command, ...args] = argv.slice(separator + 1) as [string, ...string[]];
 
   const mocks = values.mocks !== undefined ? loadMocks(values.mocks, values.name ?? null) : undefined;
-  const store = new Store(values.db);
+  let store: Store;
+  try {
+    store = new Store(values.db);
+  } catch (error) {
+    // The agent started us to reach its server, and nobody sees a failure here but the agent.
+    process.stderr.write(`[mcpspy] can't open the log at ${values.db ?? defaultDbPath()} (${(error as Error).message}); proxying without recording\n`);
+    store = new Store(':memory:');
+  }
   const { exitCode } = await runStdioProxy({ command, args, store, name: values.name ?? null, mocks });
   store.close();
 
