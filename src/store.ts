@@ -115,7 +115,8 @@ export class Store {
         this.db.exec('PRAGMA journal_mode = WAL');
         return;
       } catch (error) {
-        if ((error as { errcode?: number }).errcode !== SQLITE_BUSY || Date.now() > deadline) throw error;
+        // Extended codes (busy recovery, busy snapshot…) keep SQLITE_BUSY in their low byte.
+        if (((error as { errcode?: number }).errcode ?? 0) % 256 !== SQLITE_BUSY || Date.now() > deadline) throw error;
         Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25);
       }
     }
