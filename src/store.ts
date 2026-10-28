@@ -17,7 +17,9 @@ CREATE TABLE IF NOT EXISTS sessions (
   started_at REAL NOT NULL,
   ended_at REAL,
   exit_code INTEGER,
-  exit_signal TEXT
+  exit_signal TEXT,
+  replay_of INTEGER,
+  env_keys TEXT
 );
 
 CREATE TABLE IF NOT EXISTS messages (
@@ -51,9 +53,11 @@ CREATE TABLE IF NOT EXISTS exact_counts (
 `;
 
 /** Columns added after the first release, applied to older databases on open. */
-const MIGRATIONS: [column: string, definition: string][] = [
-  ['tokens', 'INTEGER'],
-  ['token_detail', 'TEXT'],
+const MIGRATIONS: [table: string, column: string, definition: string][] = [
+  ['messages', 'tokens', 'INTEGER'],
+  ['messages', 'token_detail', 'TEXT'],
+  ['sessions', 'replay_of', 'INTEGER'],
+  ['sessions', 'env_keys', 'TEXT'],
 ];
 
 export function defaultDbPath(): string {
@@ -82,21 +86,23 @@ export class Store {
   }
 
   private migrate(): void {
-    const columns = new Set(
-      (this.db.prepare('PRAGMA table_info(messages)').all() as { name: string }[]).map((column) => column.name),
-    );
-    for (const [column, definition] of MIGRATIONS) {
-      if (!columns.has(column)) this.db.exec(`ALTER TABLE messages ADD COLUMN ${column} ${definition}`);
+    const columns = (table: string) =>
+      new Set((this.db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[]).map((column) => column.name));
+    for (const [table, column, definition] of MIGRATIONS) {
+      if (!columns(table).has(column)) this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
     }
   }
 
-  createSession(session: Pick<SessionRow, 'name' | 'transport' | 'command' | 'cwd' | 'pid' | 'started_at'>): number {
+  createSession(
+    session: Pick<SessionRow, 'name' | 'transport' | 'command' | 'cwd' | 'pid' | 'started_at'> &
+      Partial<Pick<SessionRow, 'replay_of' | 'env_keys'>>,
+  ): number {
     const result = this.db
       .prepare(
-        `INSERT INTO sessions (name, transport, command, cwd, pid, started_at)
-         VALUES (:name, :transport, :command, :cwd, :pid, :started_at)`,
+        `INSERT INTO sessions (name, transport, command, cwd, pid, started_at, replay_of, env_keys)
+         VALUES (:name, :transport, :command, :cwd, :pid, :started_at, :replay_of, :env_keys)`,
       )
-      .run(session);
+      .run({ replay_of: null, env_keys: null, ...session });
     return Number(result.lastInsertRowid);
   }
 
@@ -144,6 +150,25 @@ export class Store {
 
   setTokens(id: number, tokens: number, detail: string | null): void {
     this.db.prepare('UPDATE messages SET tokens = ?, token_detail = ? WHERE id = ?').run(tokens, detail, id);
+  }
+
+  /** The first request of a method a client sent in a session (e.g. its initialize). */
+  firstRequest(sessionId: number, method: string): MessageRow | undefined {
+    return this.db
+      .prepare(
+        `SELECT * FROM messages WHERE session_id = ? AND method = ? AND kind = 'request' AND direction = 'client' ORDER BY id LIMIT 1`,
+      )
+      .get(sessionId, method) as MessageRow | undefined;
+  }
+
+  /** The client's most recent reply to a server-initiated request method (e.g. roots/list). */
+  clientReplyTo(sessionId: number, method: string): MessageRow | undefined {
+    return this.db
+      .prepare(
+        `SELECT * FROM messages WHERE session_id = ? AND method = ? AND direction = 'client' AND kind IN ('response', 'error')
+         ORDER BY id DESC LIMIT 1`,
+      )
+      .get(sessionId, method) as MessageRow | undefined;
   }
 
   /** The newest successful reply to `method` in a session. */

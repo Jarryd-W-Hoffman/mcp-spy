@@ -49,6 +49,8 @@ export function runStdioProxy(options: StdioProxyOptions): Promise<StdioProxyRes
     cwd,
     pid: null,
     started_at: Date.now(),
+    // Names only: replay uses them to point out variables that are missing.
+    env_keys: JSON.stringify(Object.keys(options.env ?? process.env).sort()),
   });
   const recorder = new Recorder(store, sessionId);
 

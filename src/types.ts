@@ -19,6 +19,10 @@ export interface SessionRow {
   ended_at: number | null;
   exit_code: number | null;
   exit_signal: string | null;
+  /** Session this one replayed requests from, for replay sessions. */
+  replay_of: number | null;
+  /** JSON array of environment variable names the server was started with (names only, never values). */
+  env_keys: string | null;
 }
 
 export interface MessageRow {

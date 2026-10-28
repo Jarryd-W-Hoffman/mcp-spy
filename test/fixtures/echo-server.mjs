@@ -9,6 +9,7 @@ const send = (message) => process.stdout.write(JSON.stringify(message) + '\n');
 console.error('echo-server: starting');
 if (noisy) process.stdout.write('this is not json\n');
 
+const extraTools = ['roots', 'time', 'env'].map((name) => ({ name, inputSchema: { type: 'object' } }));
 const tools = [
   {
     name: 'echo',
@@ -22,8 +23,23 @@ const tools = [
   },
 ];
 
+// Requests this server sends to the client, awaiting replies.
+const waiting = new Map();
+let nextServerId = 1;
+const askClient = (method, params) =>
+  new Promise((resolve) => {
+    const id = `server-${nextServerId++}`;
+    waiting.set(id, resolve);
+    send({ jsonrpc: '2.0', id, method, params });
+  });
+
 createInterface({ input: process.stdin }).on('line', async (line) => {
   const message = JSON.parse(line);
+  if (message.method === undefined) {
+    waiting.get(message.id)?.(message);
+    waiting.delete(message.id);
+    return;
+  }
   if (message.id === undefined) return;
 
   switch (message.method) {
@@ -38,10 +54,20 @@ createInterface({ input: process.stdin }).on('line', async (line) => {
         },
       });
     case 'tools/list':
-      return send({ jsonrpc: '2.0', id: message.id, result: { tools } });
+      return send({ jsonrpc: '2.0', id: message.id, result: { tools: [...tools, ...extraTools] } });
     case 'tools/call': {
       const { name, arguments: input = {} } = message.params ?? {};
       if (name === 'slow') await new Promise((resolve) => setTimeout(resolve, input.ms ?? 50));
+      if (name === 'roots') {
+        const reply = await askClient('roots/list', {});
+        return send({ jsonrpc: '2.0', id: message.id, result: { content: [{ type: 'text', text: JSON.stringify(reply.result ?? reply.error) }] } });
+      }
+      if (name === 'time') {
+        return send({ jsonrpc: '2.0', id: message.id, result: { content: [{ type: 'text', text: 'ok' }], structuredContent: { now: Date.now() } } });
+      }
+      if (name === 'env') {
+        return send({ jsonrpc: '2.0', id: message.id, result: { content: [{ type: 'text', text: process.env[input.key] ?? '(unset)' }] } });
+      }
       if (name === 'echo' || name === 'slow') {
         return send({ jsonrpc: '2.0', id: message.id, result: { content: [{ type: 'text', text: String(input.text ?? 'done') }] } });
       }
