@@ -70,6 +70,8 @@ mcpspy proxy https://mcp.example.com/mcp --name example
 
 Requests go to the same path on the real server, with their headers. Each MCP session (by `Mcp-Session-Id`, or by the legacy transport's event stream) is recorded as its own session. That includes JSON-RPC in POST bodies, JSON responses, and every event on SSE streams: progress notifications, and requests the server makes mid-call, such as `roots/list`. HTTP errors such as a 401 are logged with the session, and the session ends when the client sends DELETE or closes the stream. `--mocks` works here too.
 
+![Streamable HTTP and SSE sessions in the web UI, with a roots/list request from the server](docs/http.png)
+
 Headers such as `Authorization` are forwarded but never recorded. So replays and suites against servers that need them take the headers on the command line: `mcpspy replay 42 -H "Authorization: Bearer $TOKEN"`.
 
 ### Context cost
@@ -195,6 +197,8 @@ everything #1  tools/call get-sum request #19
 
 Sessions recorded before validation existed are checked the first time `tail`, `ui` or `validate` opens the log.
 
+![Schema issues in the web UI](docs/validation.png)
+
 ### Mocks
 
 A mock file holds rules that answer requests instead of the server, and tools to add to its tool list:
@@ -221,6 +225,8 @@ A mock file holds rules that answer requests instead of the server, and tools to
 Use it in front of a real server with `mcpspy run --mocks mocks.json -- <cmd>`, or without one with `mcpspy mock serve mocks.json`, which also answers `initialize`, `ping` and `tools/list` from the file. The file is reloaded when it changes; if the new version is broken, the old rules stay and a warning goes to stderr. `mcpspy mock add mocks.json <id>...` appends rules that reproduce recorded calls, copying each tool's definition from the session's tool list.
 
 Mocked responses are recorded like real ones and labelled with the rule that produced them (`[mock: outage]` in `tail`, a *mock* badge in the UI). Replaying a call goes to the real server, without mocks.
+
+![A mocked tool call in the web UI](docs/mocks.png)
 
 ## How it works
 
