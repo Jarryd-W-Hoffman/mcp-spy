@@ -124,3 +124,7 @@ npm run dev:ui
 ```
 
 The web UI lives in `ui/` (React + Vite) and builds into `dist/ui`, which the CLI serves. It has no runtime dependencies: React is bundled at build time.
+
+## License
+
+[MIT](LICENSE)
