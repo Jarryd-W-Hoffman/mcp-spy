@@ -1,6 +1,6 @@
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { Store } from '../src/store.js';
 import { addCases, emptySuite, ignoreMatcher, parseSuite, runSuite, updateExpectations, type Suite } from '../src/suite.js';
@@ -44,7 +44,10 @@ describe('replay suites', () => {
     expect(suite.servers.echo!.cwd).toBe(session.cwd);
     const nested = emptySuite();
     addCases(nested, join(dirname(session.cwd), 'a.json'), store, [recorded.echo]);
-    expect(nested.servers.echo!.cwd).toBe(session.cwd.split('/').at(-1));
+    expect(nested.servers.echo!.cwd).toBe(basename(session.cwd));
+    const deeper = emptySuite();
+    addCases(deeper, join(dirname(dirname(session.cwd)), 'a.json'), store, [recorded.echo]);
+    expect(deeper.servers.echo!.cwd).toBe(`${basename(dirname(session.cwd))}/${basename(session.cwd)}`);
   });
 
   it('passes when responses match, fails with changes when they do not, and can update', async () => {

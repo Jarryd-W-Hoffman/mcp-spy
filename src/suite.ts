@@ -1,4 +1,4 @@
-import { dirname, isAbsolute, relative, resolve } from 'node:path';
+import { dirname, isAbsolute, relative, resolve, sep } from 'node:path';
 import { comparableBody, diffJson, type JsonChange } from './diff.js';
 import { requestSubject } from './format.js';
 import { HttpRpcClient } from './http-client.js';
@@ -86,7 +86,8 @@ function serverEntry(suite: Suite, suitePath: string, store: Store, session: Ses
     where = { url: commandList[0]!, transport: session.transport as 'http' | 'sse' };
   } else {
     const relativeCwd = relative(dirname(resolve(suitePath)), session.cwd);
-    const storedCwd = relativeCwd === '' ? '.' : relativeCwd.startsWith('..') || isAbsolute(relativeCwd) ? session.cwd : relativeCwd;
+    // Forward slashes, so a suite saved on Windows also runs on macOS and Linux (and vice versa).
+    const storedCwd = relativeCwd === '' ? '.' : relativeCwd.startsWith('..') || isAbsolute(relativeCwd) ? session.cwd : relativeCwd.split(sep).join('/');
     where = { command: commandList, cwd: storedCwd };
   }
 
