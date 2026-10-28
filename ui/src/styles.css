@@ -465,6 +465,8 @@ td {
   display: flex;
   align-items: flex-start;
   gap: 8px;
+  flex: none;
+  white-space: nowrap;
 }
 
 .segmented {
@@ -685,4 +687,248 @@ td {
   .col-time {
     display: none;
   }
+}
+
+/* Tabs */
+
+.tabs {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 10px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.tabs [role='tab'] {
+  padding: 6px 10px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: none;
+  color: var(--muted);
+  cursor: pointer;
+  font-weight: 550;
+}
+
+.tabs [role='tab'].is-on {
+  color: var(--text);
+  border-bottom-color: var(--accent);
+}
+
+.tab-note {
+  font-weight: 400;
+  color: var(--muted);
+}
+
+.compare-hint {
+  margin-left: auto;
+  display: inline-flex;
+  gap: 8px;
+  padding: 3px 10px;
+  margin-bottom: 4px;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 12px;
+}
+
+.row.is-base {
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+
+/* Tools view */
+
+.tools-view {
+  flex: 1;
+  overflow: auto;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 14px 16px;
+}
+
+.card-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.card-title {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.card-figure {
+  font-size: 18px;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+}
+
+.card-figure .muted {
+  font-size: 12px;
+  font-weight: 400;
+}
+
+.card-note {
+  margin: 4px 0 12px;
+  color: var(--muted);
+}
+
+.cost-bars {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: minmax(120px, max-content) minmax(0, 1fr) 56px;
+  gap: 5px 12px;
+  align-items: center;
+}
+
+.cost-bar {
+  display: contents;
+}
+
+.cost-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cost-track {
+  height: 8px;
+  border-radius: 4px;
+  background: var(--surface-2);
+  overflow: hidden;
+}
+
+.cost-fill {
+  display: block;
+  height: 100%;
+  border-radius: 4px;
+  background: var(--accent);
+}
+
+.cost-value {
+  text-align: right;
+  color: var(--muted);
+}
+
+table.stats {
+  table-layout: auto;
+}
+
+table.stats th {
+  position: static;
+  background: none;
+}
+
+table.stats .num {
+  text-align: right;
+}
+
+.is-bad {
+  color: var(--error);
+}
+
+/* Diffs and change lists */
+
+.change-list {
+  list-style: none;
+  margin: 0 0 10px;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.change {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.change-type {
+  width: 12px;
+  font-weight: 700;
+  text-align: center;
+}
+
+.change-added .change-type {
+  color: var(--ok);
+}
+.change-removed .change-type {
+  color: var(--error);
+}
+.change-changed .change-type {
+  color: var(--warn);
+}
+
+.change-values {
+  min-width: 0;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.change-delta {
+  margin-left: auto;
+  color: var(--muted);
+}
+
+.diff-same {
+  color: var(--ok);
+}
+
+.diff {
+  border-radius: 6px;
+  background: var(--bg);
+  overflow-x: auto;
+  padding: 4px 0;
+}
+
+.diff-hunk-head {
+  padding: 2px 10px;
+  color: var(--muted);
+}
+
+.diff-line {
+  display: grid;
+  grid-template-columns: 32px 32px 14px 1fr;
+  white-space: pre;
+}
+
+.diff-num {
+  text-align: right;
+  padding-right: 6px;
+  color: var(--muted);
+  opacity: 0.7;
+  user-select: none;
+}
+
+.diff-sign {
+  user-select: none;
+}
+
+.diff-insert {
+  background: var(--ok-soft);
+}
+.diff-insert .diff-sign,
+.diff-insert .diff-text {
+  color: var(--ok);
+}
+.diff-delete {
+  background: var(--error-soft);
+}
+.diff-delete .diff-sign,
+.diff-delete .diff-text {
+  color: var(--error);
 }

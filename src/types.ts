@@ -45,7 +45,7 @@ export type NewMessage = Omit<MessageRow, 'id'>;
 export type SessionSummary = SessionRow & { message_count: number };
 
 /** A message without its payload, plus the bits the list view needs. */
-export interface MessageSummary extends Omit<MessageRow, 'payload'> {
+export interface MessageSummary extends Omit<MessageRow, 'payload' | 'token_detail'> {
   /** Tool, prompt or resource a request is about. */
   subject: string | null;
   /** Error text for JSON-RPC errors and tool results flagged isError. */
@@ -86,9 +86,11 @@ export interface ToolChange {
 export interface ToolsReport {
   sessionId: number;
   /** Cost of the tool definitions from the session's latest tools/list. */
-  definitions: { messageId: number; total: number; tools: { name: string; tokens: number }[] } | null;
+  definitions: { messageId: number; requestId: number | null; total: number; tools: { name: string; tokens: number }[] } | null;
   calls: ToolCallStats[];
   /** Earlier session of the same server whose tool list we compared against. */
   previousSessionId: number | null;
+  /** The previous session's tools/list response, for diffing. */
+  previousListMessageId: number | null;
   changes: ToolChange[] | null;
 }

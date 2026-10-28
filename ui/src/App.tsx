@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { DetailPane } from './components/DetailPane';
 import { ExchangeList } from './components/ExchangeList';
 import { SessionList } from './components/SessionList';
+import { ToolsView } from './components/ToolsView';
 import { buildExchanges, filterExchanges, type ExchangeFilter } from './exchanges';
 import { useLiveData } from './live';
 
@@ -15,6 +16,8 @@ export function App() {
     errorsOnly: false,
   });
   const [selected, setSelected] = useState<number | null>(null);
+  const [compareBase, setCompareBase] = useState<number | null>(null);
+  const [view, setView] = useState<'traffic' | 'tools'>('traffic');
 
   const exchanges = useMemo(() => buildExchanges(messages), [messages]);
   const visible = useMemo(() => filterExchanges(exchanges, filter), [exchanges, filter]);
@@ -22,13 +25,31 @@ export function App() {
   const selectedExchange = exchanges.find((exchange) => exchange.id === selected) ?? null;
   const errorCount = useMemo(() => visible.filter((exchange) => exchange.status === 'error').length, [visible]);
 
+  // The Tools tab describes one session: the selected one, else the newest.
+  const toolsSession = filter.sessionId !== null ? sessionsById.get(filter.sessionId) : sessions[0];
+
+  const describe = (id: number) => {
+    const base = exchanges.find((exchange) => exchange.id === id || exchange.response?.id === id)?.primary;
+    if (!base) return `message ${id}`;
+    const session = sessionsById.get(base.session_id)?.name;
+    return [base.method, base.subject, session && `(${session})`].filter(Boolean).join(' ');
+  };
+
+  const compare = (baseId: number, targetId: number) => {
+    setCompareBase(baseId);
+    setSelected(targetId);
+  };
+
   const update = (patch: Partial<ExchangeFilter>) => setFilter((previous) => ({ ...previous, ...patch }));
 
   // Arrow keys move through the list; Escape closes the detail pane.
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       if (event.target instanceof HTMLInputElement) return;
-      if (event.key === 'Escape') setSelected(null);
+      if (event.key === 'Escape') {
+        if (compareBase !== null) setCompareBase(null);
+        else setSelected(null);
+      }
       if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return;
       event.preventDefault();
       const index = visible.findIndex((exchange) => exchange.id === selected);
@@ -38,7 +59,7 @@ export function App() {
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [visible, selected]);
+  }, [visible, selected, compareBase]);
 
   return (
     <div className={`app ${selectedExchange ? 'has-detail' : ''}`}>
@@ -68,19 +89,44 @@ export function App() {
       <SessionList sessions={sessions} selected={filter.sessionId} onSelect={(sessionId) => update({ sessionId })} />
 
       <main className="main">
-        <ExchangeList
-          exchanges={visible}
-          sessions={sessionsById}
-          showSession={filter.sessionId === null}
-          selected={selected}
-          onSelect={setSelected}
-        />
+        <div className="tabs" role="tablist">
+          <button role="tab" aria-selected={view === 'traffic'} className={view === 'traffic' ? 'is-on' : ''} onClick={() => setView('traffic')}>
+            Traffic
+          </button>
+          <button role="tab" aria-selected={view === 'tools'} className={view === 'tools' ? 'is-on' : ''} onClick={() => setView('tools')}>
+            Tools{toolsSession ? <span className="tab-note"> · {toolsSession.name ?? `#${toolsSession.id}`}</span> : null}
+          </button>
+          {compareBase !== null && (
+            <span className="compare-hint">
+              Comparing with {describe(compareBase)}. Select another row.
+              <button className="text-button" onClick={() => setCompareBase(null)}>
+                Clear
+              </button>
+            </span>
+          )}
+        </div>
+        {view === 'traffic' ? (
+          <ExchangeList
+            exchanges={visible}
+            sessions={sessionsById}
+            showSession={filter.sessionId === null}
+            selected={selected}
+            compareBase={compareBase}
+            onSelect={setSelected}
+          />
+        ) : toolsSession ? (
+          <ToolsView session={toolsSession} onCompare={compare} />
+        ) : (
+          <div className="list-empty">No sessions yet.</div>
+        )}
       </main>
 
       {selectedExchange && (
         <DetailPane
           exchange={selectedExchange}
           sessionName={sessionsById.get(selectedExchange.primary.session_id)?.name ?? `Session #${selectedExchange.primary.session_id}`}
+          compareBase={compareBase}
+          onCompareBase={setCompareBase}
           onClose={() => setSelected(null)}
         />
       )}

@@ -3,6 +3,8 @@ import type { MessageDetail } from '../../../src/types.js';
 import type { MessageRow } from '../../../src/types.js';
 import type { Exchange } from '../exchanges';
 import { formatBytes, formatClock, formatDuration } from '../format';
+import { formatTokens } from '../../../src/tokens.js';
+import { DiffView } from './DiffView';
 import { JsonTree, type Json } from './JsonTree';
 
 type View = 'tree' | 'raw';
@@ -10,13 +12,19 @@ type View = 'tree' | 'raw';
 interface Props {
   exchange: Exchange;
   sessionName: string;
+  /** Exchange (or message) this one is being compared with, if any. */
+  compareBase: number | null;
+  onCompareBase(id: number | null): void;
   onClose(): void;
 }
 
-export function DetailPane({ exchange, sessionName, onClose }: Props) {
+export function DetailPane({ exchange, sessionName, compareBase, onCompareBase, onClose }: Props) {
   const [detail, setDetail] = useState<MessageDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [view, setView] = useState<View>('tree');
+  const [showDiff, setShowDiff] = useState(true);
+  const comparing = compareBase !== null && compareBase !== exchange.id;
+  const tokens = exchange.response?.tokens ?? exchange.primary.tokens;
   const responseId = exchange.response?.id;
 
   // Refetch when the response for a pending request arrives.
@@ -53,17 +61,40 @@ export function DetailPane({ exchange, sessionName, onClose }: Props) {
             {latency !== null && <> · {formatDuration(latency)}</>}
             {primary.kind !== 'log' && <> · {formatBytes(primary.size + (response?.size ?? 0))}</>}
             {primary.rpc_id !== null && <> · id {primary.rpc_id}</>}
+            {tokens ? <> · ≈{formatTokens(tokens)} tokens in context</> : null}
           </p>
         </div>
         <div className="detail-actions">
-          <div className="segmented" role="group" aria-label="View">
-            <button className={view === 'tree' ? 'is-on' : ''} onClick={() => setView('tree')}>
-              Tree
+          {comparing ? (
+            <div className="segmented" role="group" aria-label="Show">
+              <button className={showDiff ? 'is-on' : ''} onClick={() => setShowDiff(true)}>
+                Diff
+              </button>
+              <button className={!showDiff ? 'is-on' : ''} onClick={() => setShowDiff(false)}>
+                Message
+              </button>
+            </div>
+          ) : compareBase === exchange.id ? (
+            <button className="text-button" onClick={() => onCompareBase(null)} title="Stop comparing">
+              Comparing from here · Clear
             </button>
-            <button className={view === 'raw' ? 'is-on' : ''} onClick={() => setView('raw')}>
-              Raw
-            </button>
-          </div>
+          ) : (
+            primary.kind !== 'log' && (
+              <button className="text-button" onClick={() => onCompareBase(exchange.id)} title="Pick another row to diff against this one">
+                Compare…
+              </button>
+            )
+          )}
+          {!(comparing && showDiff) && (
+            <div className="segmented" role="group" aria-label="View">
+              <button className={view === 'tree' ? 'is-on' : ''} onClick={() => setView('tree')}>
+                Tree
+              </button>
+              <button className={view === 'raw' ? 'is-on' : ''} onClick={() => setView('raw')}>
+                Raw
+              </button>
+            </div>
+          )}
           <button className="icon-button" onClick={onClose} aria-label="Close detail">
             ×
           </button>
@@ -71,10 +102,16 @@ export function DetailPane({ exchange, sessionName, onClose }: Props) {
       </header>
 
       <div className="detail-body">
-        {error && <p className="detail-error">Couldn't load message: {error}</p>}
-        {failure && <p className="detail-failure mono">{failure}</p>}
-        {!current && !error && <p className="muted">Loading…</p>}
-        {current && <Sections detail={current} view={view} />}
+        {comparing && showDiff ? (
+          <DiffView baseId={compareBase} targetId={exchange.id} />
+        ) : (
+          <>
+            {error && <p className="detail-error">Couldn't load message: {error}</p>}
+            {failure && <p className="detail-failure mono">{failure}</p>}
+            {!current && !error && <p className="muted">Loading…</p>}
+            {current && <Sections detail={current} view={view} />}
+          </>
+        )}
       </div>
     </aside>
   );

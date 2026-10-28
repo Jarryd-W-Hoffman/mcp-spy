@@ -3,7 +3,7 @@ import { request } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import type { MessageDetail, MessageSummary, ServerEvent, SessionSummary } from '../src/api.js';
+import type { MessageDetail, MessageSummary, ServerEvent, SessionSummary, ToolsReport } from '../src/api.js';
 import { Recorder } from '../src/recorder.js';
 import { isLoopbackHost, startUiServer, type UiServer } from '../src/server.js';
 import { Store } from '../src/store.js';
@@ -112,5 +112,26 @@ describe('isLoopbackHost', () => {
     expect(isLoopbackHost('[::1]:7777')).toBe(true);
     expect(isLoopbackHost('localhost.evil.example')).toBe(false);
     expect(isLoopbackHost(undefined)).toBe(false);
+  });
+});
+
+describe('UI server tools report', () => {
+  it('serves a session tools report', async () => {
+    const store = new Store(':memory:');
+    const sessionId = store.createSession({ name: 'echo', transport: 'stdio', command: '["x"]', cwd: '/', pid: 1, started_at: 0 });
+    const recorder = new Recorder(store, sessionId);
+    recorder.frame('client', '{"jsonrpc":"2.0","id":1,"method":"tools/list"}');
+    recorder.frame('server', '{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"echo","inputSchema":{"type":"object"}}]}}');
+    const ui = await startUiServer({ store, port: 0, staticDir: null });
+
+    const report = (await (await fetch(`${ui.url}/api/sessions/${sessionId}/tools`)).json()) as ToolsReport;
+    expect(report.definitions).toMatchObject({ requestId: 1, tools: [{ name: 'echo' }] });
+    expect((await fetch(`${ui.url}/api/sessions/99/tools`)).status).toBe(404);
+
+    const [summary] = (await (await fetch(`${ui.url}/api/messages`)).json()) as MessageSummary[];
+    expect(summary).not.toHaveProperty('token_detail');
+
+    await ui.close();
+    store.close();
   });
 });

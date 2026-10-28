@@ -1,4 +1,5 @@
 import { useEffect, useLayoutEffect, useRef } from 'react';
+import { formatTokens } from '../../../src/tokens.js';
 import type { SessionSummary } from '../../../src/types.js';
 import type { Exchange } from '../exchanges';
 import { formatBytes, formatClock, formatDuration } from '../format';
@@ -8,10 +9,11 @@ interface Props {
   sessions: Map<number, SessionSummary>;
   showSession: boolean;
   selected: number | null;
+  compareBase: number | null;
   onSelect(id: number): void;
 }
 
-export function ExchangeList({ exchanges, sessions, showSession, selected, onSelect }: Props) {
+export function ExchangeList({ exchanges, sessions, showSession, selected, compareBase, onSelect }: Props) {
   const scroller = useRef<HTMLDivElement>(null);
   const pinned = useRef(true);
 
@@ -46,6 +48,7 @@ export function ExchangeList({ exchanges, sessions, showSession, selected, onSel
             <th>Message</th>
             <th className="col-status">Status</th>
             <th className="col-num">Latency</th>
+            <th className="col-num" title="Estimated tokens the result adds to the model's context">Tokens</th>
             <th className="col-num col-size">Size</th>
           </tr>
         </thead>
@@ -57,6 +60,7 @@ export function ExchangeList({ exchanges, sessions, showSession, selected, onSel
               session={sessions.get(exchange.primary.session_id)}
               showSession={showSession}
               selected={exchange.id === selected}
+              base={exchange.id === compareBase}
               onSelect={onSelect}
             />
           ))}
@@ -71,22 +75,25 @@ function Row({
   session,
   showSession,
   selected,
+  base,
   onSelect,
 }: {
   exchange: Exchange;
   session: SessionSummary | undefined;
   showSession: boolean;
   selected: boolean;
+  base: boolean;
   onSelect(id: number): void;
 }) {
   const { primary, response, status } = exchange;
   const size = primary.size + (response?.size ?? 0);
   const latency = response?.latency_ms ?? primary.latency_ms;
+  const tokens = response?.tokens ?? primary.tokens;
 
   return (
     <tr
       data-id={exchange.id}
-      className={`row row-${primary.kind} ${selected ? 'is-selected' : ''} ${status === 'error' ? 'is-error' : ''}`}
+      className={`row row-${primary.kind} ${selected ? 'is-selected' : ''} ${base ? 'is-base' : ''} ${status === 'error' ? 'is-error' : ''}`}
       onClick={() => onSelect(exchange.id)}
     >
       <td className="col-time mono">{formatClock(primary.ts)}</td>
@@ -101,6 +108,7 @@ function Row({
         <StatusBadge exchange={exchange} />
       </td>
       <td className="col-num mono">{latency !== null ? formatDuration(latency) : ''}</td>
+      <td className="col-num mono">{tokens ? `≈${formatTokens(tokens)}` : ''}</td>
       <td className="col-num col-size mono">{primary.kind === 'log' ? '' : formatBytes(size)}</td>
     </tr>
   );
@@ -119,7 +127,7 @@ function MessageLabel({ exchange: { primary } }: { exchange: Exchange }) {
     <span className="mono">
       <span className={primary.kind === 'notification' ? 'method-quiet' : 'method'}>{primary.method ?? 'response'}</span>
       {primary.subject && <span className="subject"> {primary.subject}</span>}
-      {primary.rpc_id !== null && <span className="rpc-id"> #{primary.rpc_id}</span>}
+      {primary.rpc_id !== null && <span className="rpc-id"> id={primary.rpc_id}</span>}
     </span>
   );
 }

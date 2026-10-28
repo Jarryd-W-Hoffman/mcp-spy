@@ -56,7 +56,7 @@ describe('toolsReport', () => {
   it('handles sessions without a tool list', () => {
     const store = new Store(':memory:');
     const id = store.createSession({ name: 'x', transport: 'stdio', command: '[]', cwd: '/', pid: null, started_at: 0 });
-    expect(toolsReport(store, id)).toEqual({ sessionId: id, definitions: null, calls: [], previousSessionId: null, changes: null });
+    expect(toolsReport(store, id)).toEqual({ sessionId: id, definitions: null, calls: [], previousSessionId: null, previousListMessageId: null, changes: null });
     store.close();
   });
 });

@@ -13,6 +13,20 @@ describe('diffJson', () => {
     ]);
   });
 
+  it('matches list entries by name or uri', () => {
+    const before = { tools: [{ name: 'a', d: 1 }, { name: 'slow' }, { name: 'c', d: 1 }] };
+    const after = { tools: [{ name: 'a', d: 1 }, { name: 'c', d: 2 }, { name: 'search' }] };
+    expect(diffJson(before, after)).toEqual([
+      { path: 'tools[name="slow"]', type: 'removed', before: { name: 'slow' } },
+      { path: 'tools[name="c"].d', type: 'changed', before: 1, after: 2 },
+      { path: 'tools[name="search"]', type: 'added', after: { name: 'search' } },
+    ]);
+    // Duplicate names fall back to positions.
+    expect(diffJson([{ name: 'x', v: 1 }, { name: 'x' }], [{ name: 'x', v: 2 }, { name: 'x' }])).toEqual([
+      { path: '[0].v', type: 'changed', before: 1, after: 2 },
+    ]);
+  });
+
   it('treats a type change as a single change', () => {
     expect(diffJson({ a: [1] }, { a: { 0: 1 } })).toEqual([{ path: 'a', type: 'changed', before: [1], after: { 0: 1 } }]);
     expect(diffJson(1, 1)).toEqual([]);

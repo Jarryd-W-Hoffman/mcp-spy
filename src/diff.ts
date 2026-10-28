@@ -16,6 +16,9 @@ export function diffJson(before: unknown, after: unknown, path = ''): JsonChange
   const beforeIsArray = Array.isArray(before);
   const afterIsArray = Array.isArray(after);
   if (beforeIsArray && afterIsArray) {
+    const key = identityKey(before, after);
+    if (key) return diffKeyedArrays(before as Record<string, unknown>[], after as Record<string, unknown>[], key, path);
+
     const changes: JsonChange[] = [];
     const length = Math.max(before.length, after.length);
     for (let index = 0; index < length; index++) {
@@ -41,6 +44,42 @@ export function diffJson(before: unknown, after: unknown, path = ''): JsonChange
   }
 
   return [{ path: path || '(root)', type: 'changed', before, after }];
+}
+
+/**
+ * Lists of tools, prompts or resources are compared by name (or uri), so a
+ * removed entry doesn't show up as every later entry having changed.
+ */
+function identityKey(before: unknown[], after: unknown[]): 'name' | 'uri' | null {
+  for (const key of ['name', 'uri'] as const) {
+    const unique = (items: unknown[]) => {
+      const values = items.map((item) => (isPlainObject(item) && typeof item[key] === 'string' ? item[key] : null));
+      return values.every((value) => value !== null) && new Set(values).size === values.length;
+    };
+    if (before.length + after.length > 0 && unique(before) && unique(after)) return key;
+  }
+  return null;
+}
+
+function diffKeyedArrays(
+  before: Record<string, unknown>[],
+  after: Record<string, unknown>[],
+  key: 'name' | 'uri',
+  path: string,
+): JsonChange[] {
+  const label = (item: Record<string, unknown>) => `${path}[${key}=${JSON.stringify(item[key])}]`;
+  const afterByKey = new Map(after.map((item) => [item[key], item]));
+  const beforeKeys = new Set(before.map((item) => item[key]));
+  const changes: JsonChange[] = [];
+  for (const item of before) {
+    const match = afterByKey.get(item[key]);
+    if (match) changes.push(...diffJson(item, match, label(item)));
+    else changes.push({ path: label(item), type: 'removed', before: item });
+  }
+  for (const item of after) {
+    if (!beforeKeys.has(item[key])) changes.push({ path: label(item), type: 'added', after: item });
+  }
+  return changes;
 }
 
 function joinPath(path: string, key: string): string {

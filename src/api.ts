@@ -1,11 +1,11 @@
 import { errorSummary, requestSubject } from './format.js';
 import type { MessageRow, MessageSummary } from './types.js';
 
-export type { MessageDetail, MessageSummary, ServerEvent, SessionSummary } from './types.js';
+export type { MessageDetail, MessageSummary, ServerEvent, SessionSummary, ToolsReport } from './types.js';
 
 /** The list-view form of a message: payload dropped, display fields added. */
 export function toSummary(message: MessageRow): MessageSummary {
-  const { payload, ...rest } = message;
+  const { payload, token_detail: _detail, ...rest } = message;
   const isReply = message.kind === 'response' || message.kind === 'error';
   return {
     ...rest,

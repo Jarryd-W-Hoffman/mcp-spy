@@ -18,12 +18,14 @@ export function toolsReport(store: Store, sessionId: number): ToolsReport {
     definitions: list
       ? {
           messageId: list.id,
+          requestId: list.request_id,
           total: list.tokens ?? 0,
           tools: list.token_detail ? (JSON.parse(list.token_detail) as ToolCost[]) : [],
         }
       : null,
     calls: callStats(store, sessionId),
     previousSessionId: previousList ? previous!.id : null,
+    previousListMessageId: previousList?.id ?? null,
     changes: list && previousList ? toolListChanges(previousList.payload, list.payload, previousList.token_detail, list.token_detail) : null,
   };
 }

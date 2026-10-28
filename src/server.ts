@@ -3,6 +3,8 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import type { AddressInfo } from 'node:net';
 import { extname, join, normalize, resolve, sep } from 'node:path';
 import { toSummary, type MessageDetail, type ServerEvent } from './api.js';
+import { backfillTokens } from './recorder.js';
+import { toolsReport } from './report.js';
 import type { Store } from './store.js';
 
 export interface UiServerOptions {
@@ -38,6 +40,7 @@ const CONTENT_TYPES: Record<string, string> = {
  */
 export async function startUiServer(options: UiServerOptions): Promise<UiServer> {
   const { store, host = '127.0.0.1', staticDir, pollInterval = 250 } = options;
+  backfillTokens(store);
   const clients = new Set<{ res: ServerResponse; sessionId: number | undefined }>();
 
   const send = (res: ServerResponse, event: ServerEvent) => {
@@ -100,6 +103,17 @@ export async function startUiServer(options: UiServerOptions): Promise<UiServer>
       const tail = optionalInt(url.searchParams.get('tail')) ?? 2000;
       const after = store.idBeforeLast(tail, sessionId);
       json(res, 200, store.messagesAfter(after, { sessionId, limit: tail }).map(toSummary));
+      return;
+    }
+
+    const tools = /^\/api\/sessions\/(\d+)\/tools$/.exec(url.pathname);
+    if (tools) {
+      const sessionId = Number(tools[1]);
+      if (!store.getSession(sessionId)) {
+        json(res, 404, { error: 'no such session' });
+        return;
+      }
+      json(res, 200, toolsReport(store, sessionId));
       return;
     }
 
