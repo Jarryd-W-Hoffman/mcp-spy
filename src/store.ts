@@ -66,6 +66,8 @@ const MIGRATIONS: [table: string, column: string, definition: string][] = [
   ['messages', 'mock', 'TEXT'],
 ];
 
+const SQLITE_BUSY = 5;
+
 export function defaultDbPath(): string {
   return process.env.MCPSPY_DB ?? join(homedir(), '.mcpspy', 'mcpspy.db');
 }
@@ -82,13 +84,41 @@ export class Store {
   constructor(path: string = defaultDbPath()) {
     if (path !== ':memory:') mkdirSync(dirname(path), { recursive: true });
     this.db = new DatabaseSync(path);
-    this.db.exec('PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000; PRAGMA foreign_keys = ON;');
-    this.db.exec(SCHEMA);
-    this.migrate();
+    // The timeout first: switching to WAL needs a lock, and an agent starting several
+    // proxies at once means another process may hold it.
+    this.db.exec('PRAGMA busy_timeout = 5000; PRAGMA foreign_keys = ON;');
+    this.enableWal();
+    // Under the write lock, so concurrent processes check for and add columns one at a time.
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      this.db.exec(SCHEMA);
+      this.migrate();
+      this.db.exec('COMMIT');
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    }
     this.insertMessageStmt = this.db.prepare(`
       INSERT INTO messages (session_id, ts, direction, kind, method, rpc_id, payload, size, problem, request_id, latency_ms, tokens, token_detail, issues, mock)
       VALUES (:session_id, :ts, :direction, :kind, :method, :rpc_id, :payload, :size, :problem, :request_id, :latency_ms, :tokens, :token_detail, :issues, :mock)
     `);
+  }
+
+  /**
+   * Switches to WAL, retrying while another process holds a write lock: SQLite
+   * doesn't apply the busy timeout to this switch, since waiting could deadlock.
+   */
+  private enableWal(): void {
+    const deadline = Date.now() + 5000;
+    for (;;) {
+      try {
+        this.db.exec('PRAGMA journal_mode = WAL');
+        return;
+      } catch (error) {
+        if ((error as { errcode?: number }).errcode !== SQLITE_BUSY || Date.now() > deadline) throw error;
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25);
+      }
+    }
   }
 
   private migrate(): void {
