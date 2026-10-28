@@ -1,4 +1,6 @@
-export type MessageKind = 'request' | 'notification' | 'response' | 'error' | 'invalid';
+import type { MessageKind } from './types.js';
+
+export type { MessageKind } from './types.js';
 
 export interface ClassifiedMessage {
   kind: MessageKind;
@@ -19,8 +21,8 @@ export function classifyFrame(line: string): ClassifiedMessage[] {
   let parsed: unknown;
   try {
     parsed = JSON.parse(line);
-  } catch (error) {
-    return [invalid(line, `not JSON: ${(error as Error).message}`)];
+  } catch {
+    return [invalid(line, 'not JSON')];
   }
 
   if (Array.isArray(parsed)) {

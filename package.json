@@ -13,9 +13,10 @@
     "node": ">=22.13"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.build.json",
+    "build": "tsc -p tsconfig.build.json && vite build",
     "dev": "tsx src/cli.ts",
-    "typecheck": "tsc --noEmit",
+    "dev:ui": "vite",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p ui",
     "test": "vitest run",
     "test:watch": "vitest"
   },

@@ -1,8 +1,11 @@
 #!/usr/bin/env node
-import { readFileSync } from 'node:fs';
+import { spawn } from 'node:child_process';
+import { existsSync, readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { formatBytes, formatClock, formatDuration, formatMessageLine, prettyPayload, requestSubject, styleFor } from './format.js';
 import { runStdioProxy } from './proxy/stdio.js';
+import { startUiServer } from './server.js';
 import { defaultDbPath, Store, type MessageRow, type SessionRow } from './store.js';
 
 const HELP = `mcpspy - see what your AI agent and its MCP servers say to each other
@@ -13,6 +16,7 @@ Usage:
   mcpspy tail [-f] [-n <count>] [--session <id>] [--json] [--db <path>]
   mcpspy sessions [--limit <n>] [--db <path>]
   mcpspy show <message-id> [--db <path>]
+  mcpspy ui [--port <7777>] [--open] [--db <path>]
 
 Wrap a stdio MCP server by putting mcpspy in front of its command in your
 agent's MCP config, e.g. in .mcp.json:
@@ -20,7 +24,7 @@ agent's MCP config, e.g. in .mcp.json:
   "command": "mcpspy",
   "args": ["run", "--name", "github", "--", "npx", "-y", "@modelcontextprotocol/server-github"]
 
-Then watch the traffic from another terminal with: mcpspy tail -f
+Then watch the traffic with: mcpspy ui --open (or mcpspy tail -f in a terminal)
 
 The log is a SQLite database at ${defaultDbPath()} (override with --db or MCPSPY_DB).`;
 
@@ -58,6 +62,8 @@ async function main(argv: string[]): Promise<void> {
       return sessions(rest);
     case 'show':
       return show(rest);
+    case 'ui':
+      return ui(rest);
     default:
       fail(`unknown command "${first}". Run mcpspy --help.`);
   }
@@ -230,6 +236,51 @@ function show(argv: string[]): void {
     process.stdout.write(`${header(row)}\n${prettyPayload(row.payload)}\n\n`);
   }
   if (request && !response) process.stdout.write(`${style.yellow('No response recorded.')}\n`);
+}
+
+async function ui(argv: string[]): Promise<void> {
+  const { values } = parseArgs({
+    args: argv,
+    options: {
+      port: { type: 'string', short: 'p', default: '7777' },
+      open: { type: 'boolean' },
+      db: { type: 'string' },
+    },
+  });
+
+  const store = new Store(values.db);
+  const staticDir = resolveUiDir();
+  const server = await startUiServer({ store, port: parseId(values.port, '--port'), staticDir }).catch((error: NodeJS.ErrnoException) => {
+    if (error.code === 'EADDRINUSE') fail(`port ${values.port} is in use; pick another with --port`);
+    throw error;
+  });
+
+  process.stdout.write(`mcpspy UI on ${server.url}  (log: ${values.db ?? defaultDbPath()})\n`);
+  if (!staticDir) process.stdout.write('Web UI assets not found; only the API is available. Run npm run build.\n');
+  if (values.open) openBrowser(server.url);
+
+  const stop = () => {
+    void server.close().then(() => {
+      store.close();
+      process.exit(0);
+    });
+  };
+  process.once('SIGINT', stop);
+  process.once('SIGTERM', stop);
+}
+
+/** dist/ui next to the compiled CLI, or the build output when running from source. */
+function resolveUiDir(): string | null {
+  for (const candidate of ['./ui/', '../dist/ui/']) {
+    const dir = fileURLToPath(new URL(candidate, import.meta.url));
+    if (existsSync(`${dir}index.html`)) return dir;
+  }
+  return null;
+}
+
+function openBrowser(url: string): void {
+  const command = process.platform === 'darwin' ? 'open' : process.platform === 'win32' ? 'explorer' : 'xdg-open';
+  spawn(command, [url], { stdio: 'ignore', detached: true }).on('error', () => {}).unref();
 }
 
 function parseId(value: string, what: string): number {
