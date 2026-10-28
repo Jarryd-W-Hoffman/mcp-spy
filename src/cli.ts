@@ -61,7 +61,9 @@ the local URL it prints instead of the server's.
 
 Then watch the traffic with: mcpspy ui --open (or mcpspy tail -f in a terminal)
 
-The log is a SQLite database at ${defaultDbPath()} (override with --db or MCPSPY_DB).`;
+The log is a SQLite database at ${defaultDbPath()} (override with --db or MCPSPY_DB).
+Nothing leaves your machine, except with tokens --exact, which sends the recorded
+tool definitions and results to Anthropic's count_tokens API.`;
 
 function version(): string {
   const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as { version: string };
