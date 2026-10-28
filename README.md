@@ -8,13 +8,13 @@ Unlike the official MCP Inspector, which is a client *you* drive, mcpspy records
 
 ## Status
 
-Milestone 4 of 6.
+Milestone 5 of 6.
 
 - [x] stdio proxy, SQLite log, `tail` / `sessions` / `show`
 - [x] Web UI: live stream, request/response pairs, JSON viewer
 - [x] Token estimates per tool call and for `tools/list`, JSON diffing
 - [x] Replay a recorded call against the server without the agent, and replay suites
-- [ ] Mock rules and schema validation (`inputSchema` / `outputSchema`)
+- [x] Mock rules and schema validation (`inputSchema` / `outputSchema`)
 - [ ] Streamable HTTP and SSE proxying
 
 ## Install (from source)
@@ -137,7 +137,7 @@ mcpspy tail -f
 
 | Command | What it does |
 | --- | --- |
-| `mcpspy run [--name <label>] -- <cmd> [args…]` | Start the server behind the proxy. `mcpspy -- <cmd>` is shorthand. |
+| `mcpspy run [--name <label>] [--mocks <file>] -- <cmd> [args…]` | Start the server behind the proxy. `mcpspy -- <cmd>` is shorthand. |
 | `mcpspy tail [-f] [-n 50] [--session <id>] [--json]` | Print recorded messages; `-f` follows new ones. `--json` emits NDJSON rows. |
 | `mcpspy sessions [--limit 20]` | List recorded server sessions with exit status and message count. |
 | `mcpspy show <message-id>` | Pretty-print a message alongside its request or response. |
@@ -146,12 +146,62 @@ mcpspy tail -f
 | `mcpspy diff <id> <id>` | Diff two messages, or two requests and their responses. |
 | `mcpspy replay <id> [--args <json> \| --params <json>] [--repeat <n>] [-e K=V]` | Re-run a recorded request against a fresh server and diff the response. |
 | `mcpspy suite add <file> <id>...` / `mcpspy suite run <file> [--update]` | Save recorded calls as a regression suite, and run it. |
+| `mcpspy validate [--session <id>]` | List schema and protocol issues; exits 1 if there are errors. |
+| `mcpspy mock serve <file>` / `mcpspy mock add <file> <id>...` | Run a fake server from mock rules; turn recorded calls into rules. |
 
 Every command accepts `--db <path>`. The default log is `~/.mcpspy/mcpspy.db`, or `$MCPSPY_DB` if set.
 
+### Schema validation
+
+Every message is checked as it is recorded, against what the server itself declared:
+
+- `tools/call` arguments against the tool's `inputSchema` (JSON Schema draft-07 or 2020-12, with formats such as `uri` and `date-time`), and calls to tools the server never listed.
+- `tools/call` results against the MCP content rules (block types and their required fields, `isError`) and, when the tool has an `outputSchema`, its `structuredContent`.
+- `tools/list` for duplicate names, names outside `A–Z a–z 0–9 _ - .`, and missing or invalid schemas.
+
+Issues show up as `⚠ 2 issues` in `tail`, as a badge and a list in the UI (with a *Schema issues* filter), and in `mcpspy validate`:
+
+```
+$ mcpspy validate
+everything #1  tools/call get-sum request #19
+  error    params.arguments  missing required property "b"
+  error    params.arguments.a  must be number
+
+2 errors, 0 warnings in 1 message
+```
+
+Sessions recorded before validation existed are checked the first time `tail`, `ui` or `validate` opens the log.
+
+### Mocks
+
+A mock file holds rules that answer requests instead of the server, and tools to add to its tool list:
+
+```json
+{
+  "tools": [
+    { "name": "forecast", "inputSchema": { "type": "object", "properties": { "city": { "type": "string" } }, "required": ["city"] } }
+  ],
+  "rules": [
+    { "name": "outage", "match": { "tool": "forecast", "arguments": { "city": "Oslo" } }, "toolError": "Service unavailable" },
+    { "name": "flaky search", "match": { "tool": "search*" }, "error": { "code": -32000, "message": "rate limited" }, "probability": 0.3 },
+    { "name": "slow fetch", "match": { "tool": "fetch" }, "passthrough": true, "delayMs": 4000 },
+    { "name": "hang", "match": { "method": "resources/read", "params": { "uri": "file:///big.log" } }, "drop": true },
+    { "name": "forecast", "match": { "tool": "forecast" }, "text": "Sunny in {{arguments.city}}", "delayMs": 300 }
+  ]
+}
+```
+
+- **match** on `method`, `tool` (with `*` wildcards; implies `tools/call`), `arguments` or `params` (the call must contain these values), and `server` (the `--name`). The first matching rule wins.
+- **Answer** with exactly one of `result`, `error`, `text` (a one-block tool result), `toolError` (the same with `isError: true`), `passthrough` (forward to the real server, after `delayMs`) or `drop` (never answer, to test timeouts). Strings can use `{{arguments.city}}` or `{{params.uri}}`.
+- **Limit** a rule with `times` (stop after N uses) or `probability` (0–1, for flaky behaviour), and slow it down with `delayMs`.
+
+Use it in front of a real server with `mcpspy run --mocks mocks.json -- <cmd>`, or without one with `mcpspy mock serve mocks.json`, which also answers `initialize`, `ping` and `tools/list` from the file. The file is reloaded when it changes; if the new version is broken, the old rules stay and a warning goes to stderr. `mcpspy mock add mocks.json <id>...` appends rules that reproduce recorded calls, copying each tool's definition from the session's tool list.
+
+Mocked responses are recorded like real ones and labelled with the rule that produced them (`[mock: outage]` in `tail`, a *mock* badge in the UI). Replaying a call goes to the real server, without mocks.
+
 ## How it works
 
-- Bytes are forwarded in both directions as soon as they arrive, unchanged. A copy is split into newline-delimited frames and recorded separately, so a parsing or database error can never break the agent's session (the proxy warns once on stderr and keeps forwarding).
+- Bytes are forwarded in both directions as soon as they arrive, unchanged (with `--mocks`, whole lines are forwarded instead, so requests can be intercepted). A copy is split into newline-delimited frames and recorded separately, so a parsing or database error can never break the agent's session (the proxy warns once on stderr and keeps forwarding).
 - Responses are paired with their request by sender and JSON-RPC id, so server-initiated requests (sampling, elicitation) pair correctly too. Latency is measured at the proxy.
 - The server's stderr is passed through and logged, which often explains failures that look silent from the agent.
 - Non-JSON output on stdout (a classic way to break an MCP server) is forwarded as-is and logged as `invalid`.

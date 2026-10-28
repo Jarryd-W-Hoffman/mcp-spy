@@ -102,20 +102,22 @@ function Row({
         {primary.direction === 'stderr' ? '!' : primary.direction === 'client' ? '→' : '←'}
       </td>
       <td className="col-message">
-        <MessageLabel exchange={exchange} />
+        <div className="message-cell">
+          <MessageLabel exchange={exchange} />
+          {exchange.response?.mock && (
+            <span className="badge badge-mock" title={`Answered by mock rule "${exchange.response.mock}"`}>
+              mock
+            </span>
+          )}
+          {exchange.issues.length > 0 && (
+            <span className="badge badge-issue" title={exchange.issues.map((issue) => `${issue.path}: ${issue.message}`).join('\n')}>
+              ⚠ {exchange.issues.length}
+            </span>
+          )}
+        </div>
       </td>
       <td className="col-status">
         <StatusBadge exchange={exchange} />
-        {exchange.response?.mock && (
-          <span className="badge badge-mock" title={`Answered by mock rule "${exchange.response.mock}"`}>
-            mock
-          </span>
-        )}
-        {exchange.issues.length > 0 && (
-          <span className="badge badge-issue" title={exchange.issues.map((issue) => `${issue.path}: ${issue.message}`).join('\n')}>
-            ⚠ {exchange.issues.length}
-          </span>
-        )}
       </td>
       <td className="col-num mono">{latency !== null ? formatDuration(latency) : ''}</td>
       <td className="col-num mono">{tokens ? `≈${formatTokens(tokens)}` : ''}</td>

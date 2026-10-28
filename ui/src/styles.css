@@ -269,6 +269,7 @@ code,
 }
 
 .session-tag {
+  white-space: nowrap;
   padding: 0 6px;
   border-radius: 4px;
   background: var(--accent-soft);
@@ -421,7 +422,7 @@ td {
 
 .badge {
   display: inline-block;
-  max-width: calc(100% - 44px);
+  max-width: 100%;
   padding: 1px 7px;
   border-radius: 4px;
   font-size: 11.5px;
@@ -1039,7 +1040,7 @@ table.stats .num {
 /* Schema issues */
 
 .badge-issue {
-  margin-left: 4px;
+  margin-left: 6px;
   color: var(--warn);
   background: var(--warn-soft);
 }
@@ -1086,10 +1087,27 @@ table.stats .num {
   color: var(--warn);
 }
 
+/* Badges after the message label stay visible; the label truncates instead. */
+.message-cell {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+}
+
+.message-cell > :first-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.message-cell > .badge {
+  flex-shrink: 0;
+}
+
 /* Mocks */
 
 .badge-mock {
-  margin-left: 4px;
+  margin-left: 6px;
   color: var(--accent);
   background: var(--accent-soft);
 }
