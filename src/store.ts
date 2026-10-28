@@ -67,6 +67,7 @@ CREATE TABLE IF NOT EXISTS messages (
 );
 
 CREATE INDEX IF NOT EXISTS messages_session ON messages(session_id, id);
+CREATE INDEX IF NOT EXISTS messages_request ON messages(request_id);
 `;
 
 export function defaultDbPath(): string {
@@ -132,6 +133,11 @@ export class Store {
 
   getMessage(id: number): MessageRow | undefined {
     return this.db.prepare('SELECT * FROM messages WHERE id = ?').get(id) as MessageRow | undefined;
+  }
+
+  /** The response (or error) recorded for a request, if any. */
+  responseTo(requestId: number): MessageRow | undefined {
+    return this.db.prepare('SELECT * FROM messages WHERE request_id = ? LIMIT 1').get(requestId) as MessageRow | undefined;
   }
 
   /** Messages with id greater than afterId, oldest first, optionally for one session. */
