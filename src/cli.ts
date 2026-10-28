@@ -646,7 +646,7 @@ async function replayCommand(argv: string[]): Promise<void> {
   out(
     `Replayed ${[result.original.method, subject].filter(Boolean).join(' ')} ${style.dim(`(#${messageId} from ${session.name ?? 'session'} #${session.id})`)} → session #${result.sessionId}`,
   );
-  out(style.dim(`  startup ${formatDuration(result.startupMs)} (spawn + initialize)`));
+  out(style.dim(`  startup ${formatDuration(result.startupMs)} (${result.overHttp ? 'connect' : 'spawn'} + initialize)`));
   for (const [index, run] of result.runs.entries()) {
     const failure = errorSummary({ payload: JSON.stringify(run.response) } as MessageRow);
     out(`  run ${index + 1}  ${failure ? style.red(`✗ ${failure}`) : style.green('✓')} ${formatDuration(run.latencyMs)}  ${style.dim(`#${run.responseId}`)}`);
@@ -877,6 +877,12 @@ function parseId(value: string, what: string): number {
   if (!Number.isSafeInteger(id) || id < 0 || String(id) !== value.trim()) fail(`${what} must be a number`);
   return id;
 }
+
+// Output piped into head, less, … that exits early: stop quietly instead of crashing.
+process.stdout.on('error', (error: NodeJS.ErrnoException) => {
+  if (error.code === 'EPIPE') process.exit(0);
+  throw error;
+});
 
 main(process.argv.slice(2)).catch((error: unknown) => {
   process.stderr.write(`mcpspy: ${error instanceof Error ? error.message : String(error)}\n`);

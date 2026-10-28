@@ -30,8 +30,10 @@ export interface ReplayResult {
   /** The new session the replay was recorded in. */
   sessionId: number;
   original: { requestId: number; responseId: number | null; method: string };
-  /** Spawn to initialize response. */
+  /** Spawn (or first request, over HTTP) to initialize response. */
   startupMs: number;
+  /** The server was reached over HTTP rather than started. */
+  overHttp: boolean;
   runs: ReplayRun[];
   /** Config-like variables the original server had that aren't set now. */
   missingEnv: string[];
@@ -133,6 +135,7 @@ export async function replay(options: ReplayOptions): Promise<ReplayResult> {
     sessionId,
     original: { requestId: request.id, responseId: store.responseTo(request.id)?.id ?? null, method: request.method },
     startupMs,
+    overHttp,
     runs,
     missingEnv: missingEnv(session, env),
   };

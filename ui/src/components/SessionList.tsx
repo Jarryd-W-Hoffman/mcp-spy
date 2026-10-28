@@ -38,7 +38,7 @@ export function SessionList({ sessions, selected, onSelect }: Props) {
               {(session.transport === 'http' || session.transport === 'sse') && <span className="session-tag">{session.transport}</span>}
             </span>
             <span className="session-meta">
-              {session.message_count} messages · {running ? 'running' : failed ? (session.exit_signal ?? `exit ${session.exit_code}`) : session.exit_code === null ? 'closed' : 'exited'} ·{' '}
+              {session.message_count} {session.message_count === 1 ? 'message' : 'messages'} · {running ? 'running' : failed ? (session.exit_signal ?? `exit ${session.exit_code}`) : session.exit_code === null ? 'closed' : 'exited'} ·{' '}
               {formatRelative(session.started_at)}
             </span>
           </button>

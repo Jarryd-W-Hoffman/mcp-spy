@@ -8,14 +8,14 @@ Unlike the official MCP Inspector, which is a client *you* drive, mcpspy records
 
 ## Status
 
-Milestone 5 of 6.
+All six milestones are done.
 
 - [x] stdio proxy, SQLite log, `tail` / `sessions` / `show`
 - [x] Web UI: live stream, request/response pairs, JSON viewer
 - [x] Token estimates per tool call and for `tools/list`, JSON diffing
 - [x] Replay a recorded call against the server without the agent, and replay suites
 - [x] Mock rules and schema validation (`inputSchema` / `outputSchema`)
-- [ ] Streamable HTTP and SSE proxying
+- [x] Streamable HTTP and SSE proxying
 
 ## Install (from source)
 
@@ -49,6 +49,28 @@ mcpspy ui --open      # http://localhost:7777
 ```
 
 Every session shows up live. Each row pairs a request with its response, showing status, latency and size. Click a row to see both as a JSON tree or raw text, with tool results rendered the way the agent received them (text and images). Filter by server, text, notifications, stderr or errors only, and move between rows with ↑/↓.
+
+### Servers over HTTP
+
+For a remote server, or a local one that speaks Streamable HTTP or the older HTTP+SSE transport, start a proxy in front of it and point your agent at the local URL it prints:
+
+```sh
+mcpspy proxy https://mcp.example.com/mcp --name example
+# mcpspy proxying https://mcp.example.com/mcp
+# Point your agent at http://127.0.0.1:7800/mcp
+```
+
+```json
+{
+  "mcpServers": {
+    "example": { "type": "http", "url": "http://127.0.0.1:7800/mcp" }
+  }
+}
+```
+
+Requests go to the same path on the real server, with their headers. Each MCP session (by `Mcp-Session-Id`, or by the legacy transport's event stream) is recorded as its own session. That includes JSON-RPC in POST bodies, JSON responses, and every event on SSE streams: progress notifications, and requests the server makes mid-call, such as `roots/list`. HTTP errors such as a 401 are logged with the session, and the session ends when the client sends DELETE or closes the stream. `--mocks` works here too.
+
+Headers such as `Authorization` are forwarded but never recorded. So replays and suites against servers that need them take the headers on the command line: `mcpspy replay 42 -H "Authorization: Bearer $TOKEN"`.
 
 ### Context cost
 
@@ -117,7 +139,7 @@ mcpspy suite run mcp.suite.json --update   # accept the new responses
 2 passed, 1 failed
 ```
 
-The suite stores each server's command, working directory (relative to the suite file when it's below it), `initialize` params and the agent's replies to server requests, plus each case's params and expected `result` or `error`. For values that change between runs, list their paths in a case's `ignore` array. `*` matches one key and `[*]` any array index, e.g. `["structuredContent.now", "content[*].text"]`. Run it in CI like any other test command.
+The suite stores each server's command and working directory (relative to the suite file when it's below it), or its URL for servers reached over HTTP. It also stores the `initialize` params and the agent's replies to server requests, plus each case's params and expected `result` or `error`. For values that change between runs, list their paths in a case's `ignore` array. `*` matches one key and `[*]` any array index, e.g. `["structuredContent.now", "content[*].text"]`. Run it in CI like any other test command.
 
 Or stay in the terminal:
 
@@ -138,14 +160,15 @@ mcpspy tail -f
 | Command | What it does |
 | --- | --- |
 | `mcpspy run [--name <label>] [--mocks <file>] -- <cmd> [args…]` | Start the server behind the proxy. `mcpspy -- <cmd>` is shorthand. |
+| `mcpspy proxy <url> [--port 7800] [--name <label>] [--mocks <file>]` | Proxy a server reached over HTTP (Streamable HTTP or HTTP+SSE). |
 | `mcpspy tail [-f] [-n 50] [--session <id>] [--json]` | Print recorded messages; `-f` follows new ones. `--json` emits NDJSON rows. |
 | `mcpspy sessions [--limit 20]` | List recorded server sessions with exit status and message count. |
 | `mcpspy show <message-id>` | Pretty-print a message alongside its request or response. |
 | `mcpspy ui [--port 7777] [--open] [--read-only]` | Serve the web inspector on localhost. `--read-only` disables replay. |
 | `mcpspy tokens [--session <id>] [--exact] [--model <id>]` | Context cost of a session's tools, call stats, and tool list changes. |
 | `mcpspy diff <id> <id>` | Diff two messages, or two requests and their responses. |
-| `mcpspy replay <id> [--args <json> \| --params <json>] [--repeat <n>] [-e K=V]` | Re-run a recorded request against a fresh server and diff the response. |
-| `mcpspy suite add <file> <id>...` / `mcpspy suite run <file> [--update]` | Save recorded calls as a regression suite, and run it. |
+| `mcpspy replay <id> [--args <json> \| --params <json>] [--repeat <n>] [-e K=V] [-H 'Name: value']` | Re-run a recorded request against a fresh server (or session) and diff the response. |
+| `mcpspy suite add <file> <id>...` / `mcpspy suite run <file> [--update] [-H …]` | Save recorded calls as a regression suite, and run it. |
 | `mcpspy validate [--session <id>]` | List schema and protocol issues; exits 1 if there are errors. |
 | `mcpspy mock serve <file>` / `mcpspy mock add <file> <id>...` | Run a fake server from mock rules; turn recorded calls into rules. |
 
@@ -206,6 +229,7 @@ Mocked responses are recorded like real ones and labelled with the rule that pro
 - The server's stderr is passed through and logged, which often explains failures that look silent from the agent.
 - Non-JSON output on stdout (a classic way to break an MCP server) is forwarded as-is and logged as `invalid`.
 - Signals are forwarded to the server, and the proxy exits with the server's exit code.
+- `mcpspy proxy` asks the server for uncompressed bodies so it can read them. It holds each SSE event until its terminating blank line before forwarding it, so an event can be recorded, and rewritten if needed: the legacy transport's absolute `endpoint` URL is pointed back at the proxy, and with `--mocks`, mock tools are added to `tools/list`. Like the UI, it binds to 127.0.0.1 and refuses requests whose `Host` or `Origin` isn't local, so a web page can't use it to reach your servers.
 - The UI server binds to 127.0.0.1 and rejects requests whose `Host` isn't a loopback name, because recorded payloads can contain tokens and other secrets.
 - Replay from the UI starts processes, so its endpoint also requires a custom header and a JSON body, which a cross-site request can't send without a CORS preflight that mcpspy never approves. It also rejects foreign `Origin` and `Sec-Fetch-Site` values. Run `mcpspy ui --read-only` to turn replay off entirely.
 
