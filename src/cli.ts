@@ -17,8 +17,8 @@ Usage:
 Wrap a stdio MCP server by putting mcpspy in front of its command in your
 agent's MCP config, e.g. in .mcp.json:
 
-  "command": "npx",
-  "args": ["mcpspy", "run", "--name", "github", "--", "npx", "-y", "@modelcontextprotocol/server-github"]
+  "command": "mcpspy",
+  "args": ["run", "--name", "github", "--", "npx", "-y", "@modelcontextprotocol/server-github"]
 
 Then watch the traffic from another terminal with: mcpspy tail -f
 
