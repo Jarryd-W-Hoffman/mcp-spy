@@ -179,3 +179,89 @@ describe('HTTP proxy', () => {
     fixture = await startHttpFixture(); // so afterEach can close something
   });
 });
+
+describe('replaying HTTP sessions', () => {
+  let store: Store;
+  let fixture: Fixture;
+  let proxy: HttpProxy;
+
+  beforeEach(async () => {
+    store = new Store(':memory:');
+    fixture = await startHttpFixture();
+  });
+  afterEach(async () => {
+    await proxy.close();
+    await fixture.close();
+    store.close();
+  });
+
+  const post = (url: string, body: unknown, session?: string) =>
+    fetch(url, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream', ...(session ? { 'mcp-session-id': session } : {}) },
+      body: JSON.stringify(body),
+    });
+
+  it('replays Streamable HTTP calls in a new session, answering server requests from the recording', async () => {
+    const { replay } = await import('../src/replay.js');
+    proxy = await startHttpProxy({ upstream: fixture.url, store, port: 0 });
+    const session = (await post(proxy.url, { jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18', capabilities: { roots: {} }, clientInfo: { name: 'agent', version: '1' } } })).headers.get('mcp-session-id')!;
+    await post(proxy.url, { jsonrpc: '2.0', method: 'notifications/initialized' }, session);
+    const call = events(await post(proxy.url, { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'roots', arguments: {} } }, session));
+    await call.next();
+    await call.next();
+    await post(proxy.url, { jsonrpc: '2.0', id: 'ask-1', result: { roots: [{ uri: 'file:///only' }] } }, session);
+    await call.next();
+    await post(proxy.url, { jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'echo', arguments: { text: 'hi' } } }, session);
+
+    const [original] = store.listSessions();
+    const requests = store.messagesAfter(0, { sessionId: original!.id }).filter((m) => m.method === 'tools/call' && m.direction === 'client');
+
+    const roots = await replay({ store, messageId: requests[0]!.id });
+    expect(roots.runs[0]!.response).toMatchObject({ result: { content: [{ text: '1 roots' }] } });
+    const echo = await replay({ store, messageId: requests[1]!.id, params: { name: 'echo', arguments: { text: 'again' } }, repeat: 2 });
+    expect(echo.runs.map((run) => (run.response.result as { content: { text: string }[] }).content[0]!.text)).toEqual(['again', 'again']);
+
+    const replayed = store.getSession(echo.sessionId)!;
+    expect(replayed).toMatchObject({ transport: 'replay', replay_of: original!.id, env_keys: null });
+    expect(fixture.deleted).toEqual(['S2', 'S3']); // each replay ends its own server session
+
+    // Suites keep the URL (never headers) and run over HTTP too.
+    const { addCases, emptySuite, runSuite } = await import('../src/suite.js');
+    const suite = emptySuite();
+    addCases(suite, '/tmp/x/suite.json', store, [requests[0]!.id, requests[1]!.id]);
+    expect(Object.values(suite.servers)).toEqual([
+      { url: fixture.url, transport: 'http', initialize: expect.objectContaining({ clientInfo: { name: 'agent', version: '1' } }), clientReplies: { 'roots/list': { result: { roots: [{ uri: 'file:///only' }] } } } },
+    ]);
+    const results = await runSuite(suite, '/tmp/x/suite.json', { headers: { authorization: 'Bearer test' } });
+    expect(results.map((result) => result.status)).toEqual(['pass', 'pass']);
+
+    // A replay of a replay still goes over HTTP.
+    const again = await replay({ store, messageId: echo.runs[0]!.requestId! });
+    expect(again.runs[0]!.response).toMatchObject({ result: { content: [{ text: 'again' }] } });
+  });
+
+  it('replays legacy SSE sessions, and explains HTTP errors', async () => {
+    const { replay, ReplayError } = await import('../src/replay.js');
+    proxy = await startHttpProxy({ upstream: `${fixture.origin}/sse`, store, port: 0 });
+    const stream = events(await fetch(proxy.url, { headers: { accept: 'text/event-stream' } }));
+    const endpoint = (await stream.next()).data!;
+    await post(endpoint, { jsonrpc: '2.0', id: 1, method: 'initialize', params: {} });
+    await stream.next();
+    await post(endpoint, { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'echo', arguments: { text: 'legacy' } } });
+    await stream.next();
+
+    const call = store.messagesAfter(0, {}).find((m) => m.method === 'tools/call' && m.direction === 'client')!;
+    const result = await replay({ store, messageId: call.id, timeoutMs: 2000 });
+    expect(result.runs[0]!.response).toMatchObject({ result: { content: [{ text: 'legacy' }] } });
+
+    // Point the recorded session at a URL that refuses requests.
+    const sessionId = call.session_id;
+    (store as unknown as { db: { prepare(sql: string): { run(...args: unknown[]): void } } }).db
+      .prepare("UPDATE sessions SET transport = 'http', command = ? WHERE id = ?")
+      .run(JSON.stringify([`${fixture.origin}/missing`]), sessionId);
+    const failed = replay({ store, messageId: call.id, timeoutMs: 2000 });
+    await expect(failed).rejects.toBeInstanceOf(ReplayError);
+    await expect(failed).rejects.toThrow(/initialize failed|HTTP 404/);
+  });
+});

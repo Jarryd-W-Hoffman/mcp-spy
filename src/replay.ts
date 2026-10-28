@@ -1,5 +1,6 @@
 import { Recorder } from './recorder.js';
-import { RpcError, StdioRpcClient, type JsonRpcReply } from './rpc-client.js';
+import { HttpRpcClient } from './http-client.js';
+import { RpcClient, RpcError, StdioRpcClient, type JsonRpcReply } from './rpc-client.js';
 import type { Store } from './store.js';
 import type { MessageRow, SessionRow } from './types.js';
 
@@ -13,6 +14,8 @@ export interface ReplayOptions {
   repeat?: number;
   /** Extra environment variables for the server, on top of this process's. */
   env?: Record<string, string>;
+  /** HTTP headers for servers reached over HTTP, e.g. Authorization (which is never recorded). */
+  headers?: Record<string, string>;
   timeoutMs?: number;
 }
 
@@ -51,7 +54,8 @@ const DEFAULT_INITIALIZE = {
 
 /**
  * Replays a recorded request against a fresh copy of the server that
- * received it: same command and working directory, the same initialize
+ * received it (or a new session with it, for servers reached over HTTP):
+ * same command and working directory, the same initialize
  * the agent sent, and the agent's recorded answers to any requests the
  * server makes back (roots/list, …). The replay is recorded as a new
  * session linked to the original.
@@ -65,13 +69,16 @@ export async function replay(options: ReplayOptions): Promise<ReplayResult> {
   }
   if (request.method === 'initialize') throw new ReplayError('initialize is sent automatically; replay a later request');
   const session = store.getSession(request.session_id)!;
-  if (session.transport !== 'stdio' && session.transport !== 'replay' && session.transport !== 'mock') {
-    throw new ReplayError(`replaying ${session.transport} sessions is not supported yet`);
+  const originSessionId = session.replay_of ?? session.id;
+  // Replays are recorded as 'replay'; how to reach the server comes from the session they replay.
+  const transport = store.getSession(originSessionId)?.transport ?? session.transport;
+  if (!['stdio', 'mock', 'http', 'sse'].includes(transport)) {
+    throw new ReplayError(`replaying ${transport} sessions is not supported`);
   }
+  const overHttp = transport === 'http' || transport === 'sse';
 
   const [command, ...args] = JSON.parse(session.command) as [string, ...string[]];
   const env = { ...process.env, ...options.env };
-  const originSessionId = session.replay_of ?? session.id;
   const params = options.params !== undefined ? options.params : (JSON.parse(request.payload) as { params?: unknown }).params;
 
   const sessionId = store.createSession({
@@ -82,21 +89,17 @@ export async function replay(options: ReplayOptions): Promise<ReplayResult> {
     pid: null,
     started_at: Date.now(),
     replay_of: originSessionId,
-    env_keys: JSON.stringify(Object.keys(env).sort()),
+    env_keys: overHttp ? null : JSON.stringify(Object.keys(env).sort()),
   });
 
   const recorder = new Recorder(store, sessionId);
   const toolList = store.latestReply(originSessionId, 'tools/list');
   if (toolList) recorder.useToolList(toolList.payload);
 
-  const client = new StdioRpcClient({
-    command,
-    args,
-    cwd: session.cwd,
-    env,
-    recorder,
-    onServerRequest: (method) => recordedClientReply(store, originSessionId, method),
-  });
+  const onServerRequest = (method: string) => recordedClientReply(store, originSessionId, method);
+  const client: RpcClient = overHttp
+    ? new HttpRpcClient({ url: command, transport: transport as 'http' | 'sse', headers: options.headers, recorder, onServerRequest })
+    : new StdioRpcClient({ command, args, cwd: session.cwd, env, recorder, onServerRequest });
   if (client.pid !== undefined) store.setSessionPid(sessionId, client.pid);
 
   const runs: ReplayRun[] = [];

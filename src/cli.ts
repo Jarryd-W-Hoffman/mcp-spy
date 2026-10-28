@@ -43,9 +43,9 @@ Usage:
   mcpspy ui [--port <7777>] [--open] [--read-only] [--db <path>]
   mcpspy tokens [--session <id>] [--exact] [--model <id>] [--db <path>]
   mcpspy diff <message-id> <message-id> [--db <path>]
-  mcpspy replay <message-id> [--args <json> | --params <json>] [--repeat <n>] [-e KEY=VALUE]... [--json]
+  mcpspy replay <message-id> [--args <json> | --params <json>] [--repeat <n>] [-e KEY=VALUE]... [-H 'Name: value']... [--json]
   mcpspy suite add <file> <message-id>... [--name <case name>]
-  mcpspy suite run <file> [--update] [--only <text>] [--json]
+  mcpspy suite run <file> [--update] [--only <text>] [-H 'Name: value']... [--json]
   mcpspy validate [--session <id>] [--db <path>]
   mcpspy mock serve <file> [--name <label>]  a fake MCP server driven by mock rules
   mcpspy mock add <file> <message-id>...     turn recorded calls into mock rules
@@ -586,6 +586,7 @@ async function replayCommand(argv: string[]): Promise<void> {
       params: { type: 'string' },
       repeat: { type: 'string', default: '1' },
       env: { type: 'string', multiple: true, short: 'e' },
+      header: { type: 'string', multiple: true, short: 'H' },
       timeout: { type: 'string', default: '30000' },
       json: { type: 'boolean' },
       db: { type: 'string' },
@@ -602,6 +603,7 @@ async function replayCommand(argv: string[]): Promise<void> {
     if (index <= 0) fail(`--env expects KEY=VALUE, got "${pair}"`);
     env[pair.slice(0, index)] = pair.slice(index + 1);
   }
+  const headers = parseHeaders(values.header);
   const parseJson = (text: string, flag: string): unknown => {
     try {
       return JSON.parse(text);
@@ -620,7 +622,7 @@ async function replayCommand(argv: string[]): Promise<void> {
 
   let result: ReplayResult;
   try {
-    result = await replay({ store, messageId, params, repeat, env, timeoutMs: parseId(values.timeout, '--timeout') });
+    result = await replay({ store, messageId, params, repeat, env, headers, timeoutMs: parseId(values.timeout, '--timeout') });
   } catch (error) {
     store.close();
     if (error instanceof ReplayError) {
@@ -669,6 +671,17 @@ async function replayCommand(argv: string[]): Promise<void> {
   }
 }
 
+/** -H "Name: value" flags, for servers reached over HTTP. */
+function parseHeaders(lines: string[] = []): Record<string, string> {
+  const headers: Record<string, string> = {};
+  for (const line of lines) {
+    const index = line.indexOf(':');
+    if (index <= 0) fail(`--header expects "Name: value", got "${line}"`);
+    headers[line.slice(0, index).trim().toLowerCase()] = line.slice(index + 1).trim();
+  }
+  return headers;
+}
+
 async function suiteCommand(argv: string[]): Promise<void> {
   const [action, ...rest] = argv;
   const { values, positionals } = parseArgs({
@@ -678,6 +691,7 @@ async function suiteCommand(argv: string[]): Promise<void> {
       name: { type: 'string' },
       update: { type: 'boolean' },
       only: { type: 'string' },
+      header: { type: 'string', multiple: true, short: 'H' },
       timeout: { type: 'string', default: '30000' },
       json: { type: 'boolean' },
       db: { type: 'string' },
@@ -720,6 +734,7 @@ async function suiteCommand(argv: string[]): Promise<void> {
   if (suite.cases.length === 0) fail(`${file} has no cases; add some with mcpspy suite add`);
   const results = await runSuite(suite, file, {
     filter: values.only,
+    headers: parseHeaders(values.header),
     timeoutMs: parseId(values.timeout, '--timeout'),
     onResult: values.json
       ? undefined

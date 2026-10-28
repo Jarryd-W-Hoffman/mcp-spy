@@ -1,8 +1,10 @@
 import { dirname, isAbsolute, relative, resolve } from 'node:path';
 import { comparableBody, diffJson, type JsonChange } from './diff.js';
 import { requestSubject } from './format.js';
-import { RpcError, StdioRpcClient, type JsonRpcReply } from './rpc-client.js';
+import { HttpRpcClient } from './http-client.js';
+import { RpcClient, RpcError, StdioRpcClient, type JsonRpcReply } from './rpc-client.js';
 import type { Store } from './store.js';
+import type { SessionRow } from './types.js';
 
 /**
  * A replay suite: recorded requests and the responses they produced, saved
@@ -16,9 +18,13 @@ export interface Suite {
 }
 
 export interface SuiteServer {
-  command: string[];
+  /** For stdio servers: the command that starts the server. */
+  command?: string[];
   /** Relative to the suite file when the server lives below it. */
-  cwd: string;
+  cwd?: string;
+  /** For servers reached over HTTP: the MCP endpoint. Headers are passed with suite run -H. */
+  url?: string;
+  transport?: 'http' | 'sse';
   /** The initialize params the agent sent. */
   initialize: unknown;
   /** The agent's replies to requests the server makes (roots/list, …). */
@@ -54,7 +60,7 @@ export function addCases(suite: Suite, suitePath: string, store: Store, messageI
 
     const session = store.getSession(request.session_id)!;
     const origin = session.replay_of !== null ? store.getSession(session.replay_of)! : session;
-    const serverKey = serverEntry(suite, suitePath, store, origin.id, origin.name, origin.command, origin.cwd);
+    const serverKey = serverEntry(suite, suitePath, store, origin);
 
     const subject = requestSubject(request.method, request.payload);
     const base = name && messageIds.length === 1 ? name : [request.method, subject].filter(Boolean).join(' ');
@@ -71,22 +77,24 @@ export function addCases(suite: Suite, suitePath: string, store: Store, messageI
   return added;
 }
 
-function serverEntry(
-  suite: Suite,
-  suitePath: string,
-  store: Store,
-  sessionId: number,
-  sessionName: string | null,
-  command: string,
-  cwd: string,
-): string {
-  const commandList = JSON.parse(command) as string[];
-  const suiteDir = dirname(resolve(suitePath));
-  const relativeCwd = relative(suiteDir, cwd);
-  const storedCwd = relativeCwd === '' ? '.' : relativeCwd.startsWith('..') || isAbsolute(relativeCwd) ? cwd : relativeCwd;
+function serverEntry(suite: Suite, suitePath: string, store: Store, session: SessionRow): string {
+  const sessionId = session.id;
+  const commandList = JSON.parse(session.command) as string[];
+  const overHttp = session.transport === 'http' || session.transport === 'sse';
+  let where: Pick<SuiteServer, 'command' | 'cwd' | 'url' | 'transport'>;
+  if (overHttp) {
+    where = { url: commandList[0]!, transport: session.transport as 'http' | 'sse' };
+  } else {
+    const relativeCwd = relative(dirname(resolve(suitePath)), session.cwd);
+    const storedCwd = relativeCwd === '' ? '.' : relativeCwd.startsWith('..') || isAbsolute(relativeCwd) ? session.cwd : relativeCwd;
+    where = { command: commandList, cwd: storedCwd };
+  }
 
   for (const [key, server] of Object.entries(suite.servers)) {
-    if (JSON.stringify(server.command) === JSON.stringify(commandList) && server.cwd === storedCwd) return key;
+    const same = overHttp
+      ? server.url === where.url && server.transport === where.transport
+      : JSON.stringify(server.command) === JSON.stringify(where.command) && server.cwd === where.cwd;
+    if (same) return key;
   }
 
   const initialize = store.firstRequest(sessionId, 'initialize');
@@ -98,10 +106,9 @@ function serverEntry(
     clientReplies[method] = 'result' in message ? { result: message.result } : { error: message.error as { code: number; message: string } };
   }
 
-  const key = uniqueName(sessionName ?? commandList[0] ?? 'server', new Set(Object.keys(suite.servers)));
+  const key = uniqueName(session.name ?? commandList[0] ?? 'server', new Set(Object.keys(suite.servers)));
   suite.servers[key] = {
-    command: commandList,
-    cwd: storedCwd,
+    ...where,
     initialize: initialize ? (JSON.parse(initialize.payload) as { params?: unknown }).params : {},
     ...(Object.keys(clientReplies).length > 0 ? { clientReplies } : {}),
   };
@@ -142,6 +149,8 @@ export interface RunOptions {
   /** Only run cases whose name contains this text. */
   filter?: string;
   env?: NodeJS.ProcessEnv;
+  /** Headers for servers reached over HTTP, e.g. Authorization. */
+  headers?: Record<string, string>;
   timeoutMs?: number;
   onResult?(result: CaseResult): void;
 }
@@ -160,15 +169,16 @@ export async function runSuite(suite: Suite, suitePath: string, options: RunOpti
       results.push(result);
       options.onResult?.(result);
     };
-    const [command, ...args] = server.command as [string, ...string[]];
-    const client = new StdioRpcClient({
-      command,
-      args,
-      cwd: isAbsolute(server.cwd) ? server.cwd : resolve(suiteDir, server.cwd),
-      env: options.env ?? process.env,
-      onServerRequest: (method) =>
-        server.clientReplies?.[method] ?? (method === 'ping' ? { result: {} } : { error: { code: -32601, message: `no reply to ${method}` } }),
-    });
+    const onServerRequest = (method: string): JsonRpcReply =>
+      server.clientReplies?.[method] ?? (method === 'ping' ? { result: {} } : { error: { code: -32601, message: `no reply to ${method}` } });
+    let client: RpcClient;
+    if (server.url !== undefined) {
+      client = new HttpRpcClient({ url: server.url, transport: server.transport ?? 'http', headers: options.headers, onServerRequest });
+    } else {
+      const [command, ...args] = server.command as [string, ...string[]];
+      const cwd = server.cwd ?? '.';
+      client = new StdioRpcClient({ command, args, cwd: isAbsolute(cwd) ? cwd : resolve(suiteDir, cwd), env: options.env ?? process.env, onServerRequest });
+    }
 
     try {
       const init = await client.request('initialize', server.initialize, options.timeoutMs);
@@ -217,6 +227,9 @@ export function parseSuite(text: string): Suite {
   const suite = JSON.parse(text) as Suite;
   if (suite.version !== 1 || typeof suite.servers !== 'object' || !Array.isArray(suite.cases)) {
     throw new Error('not an mcpspy suite (expected version 1 with servers and cases)');
+  }
+  for (const [key, server] of Object.entries(suite.servers)) {
+    if (!Array.isArray(server.command) && typeof server.url !== 'string') throw new Error(`server "${key}" needs a command or a url`);
   }
   for (const testCase of suite.cases) {
     if (!suite.servers[testCase.server]) throw new Error(`case "${testCase.name}" refers to unknown server "${testCase.server}"`);
