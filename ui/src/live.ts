@@ -1,14 +1,22 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { MessageSummary, ServerEvent, SessionSummary } from '../../src/types.js';
 
 export type ConnectionState = 'connecting' | 'live' | 'offline';
 
 const MAX_MESSAGES = 20_000;
+/** Sessions the server sends at a time, live and per page of older ones. */
+const SESSION_PAGE = 200;
 
 interface LiveData {
   messages: MessageSummary[];
   sessions: SessionSummary[];
   connection: ConnectionState;
+}
+
+interface LiveSessions extends LiveData {
+  /** Whether there may be sessions older than those listed. */
+  moreSessions: boolean;
+  loadOlderSessions(): void;
 }
 
 /**
@@ -37,8 +45,10 @@ export function mergeMessages(
  * a session loads its messages too, since older sessions fall outside the
  * recent ones.
  */
-export function useLiveData(sessionId: number | null = null): LiveData {
+export function useLiveData(sessionId: number | null = null): LiveSessions {
   const [state, setState] = useState<LiveData>({ messages: [], sessions: [], connection: 'connecting' });
+  // Pages of sessions older than the newest ones, which the server streams.
+  const [older, setOlder] = useState<{ sessions: SessionSummary[]; more: boolean }>({ sessions: [], more: true });
   const mergeRef = useRef<(incoming: MessageSummary[]) => void>(() => {});
   const sessionRef = useRef(sessionId);
   sessionRef.current = sessionId;
@@ -117,5 +127,22 @@ export function useLiveData(sessionId: number | null = null): LiveData {
     };
   }, [sessionId]);
 
-  return state;
+  const sessions = useMemo(() => {
+    const oldestLive = state.sessions.at(-1)?.id ?? Infinity;
+    return [...state.sessions, ...older.sessions.filter((session) => session.id < oldestLive)];
+  }, [state.sessions, older.sessions]);
+  const moreSessions = older.sessions.length === 0 ? state.sessions.length >= SESSION_PAGE : older.more;
+
+  const oldest = sessions.at(-1)?.id;
+  const loadOlderSessions = useCallback(() => {
+    if (oldest === undefined) return;
+    fetch(`/api/sessions?before=${oldest}`)
+      .then((response) => response.json() as Promise<SessionSummary[]>)
+      .then((page) => setOlder((previous) => ({ sessions: [...previous.sessions, ...page], more: page.length >= SESSION_PAGE })))
+      .catch(() => {
+        // The event stream reports the server going away.
+      });
+  }, [oldest]);
+
+  return { ...state, sessions, moreSessions, loadOlderSessions };
 }

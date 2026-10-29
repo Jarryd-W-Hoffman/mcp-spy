@@ -146,7 +146,7 @@ export async function startUiServer(options: UiServerOptions): Promise<UiServer>
     }
 
     if (url.pathname === '/api/sessions') {
-      json(res, 200, store.listSessions(200));
+      json(res, 200, store.listSessions(200, optionalInt(url.searchParams.get('before'))));
       return;
     }
 
@@ -178,7 +178,12 @@ export async function startUiServer(options: UiServerOptions): Promise<UiServer>
       }
       const request =
         message.kind === 'request' ? message : message.request_id !== null ? (store.getMessage(message.request_id) ?? null) : null;
-      const response = message.kind === 'request' ? (store.responseTo(message.id) ?? null) : message.request_id !== null ? message : null;
+      let response = message.kind === 'request' ? (store.responseTo(message.id) ?? null) : message.request_id !== null ? message : null;
+      // For diffs: a tool list sent in pages is compared as a whole.
+      if (url.searchParams.has('listing') && response?.method === 'tools/list') {
+        const listing = store.toolListFrom(response.id);
+        if (listing && listing.pages > 1) response = { ...response, payload: listing.payload };
+      }
       json(res, 200, { message, request, response } satisfies MessageDetail);
       return;
     }

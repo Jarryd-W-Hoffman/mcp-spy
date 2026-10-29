@@ -137,6 +137,44 @@ describe('UI server tools report', () => {
   });
 });
 
+describe('UI server paging', () => {
+  it('lists older sessions before a given id', async () => {
+    const store = new Store(':memory:');
+    for (let i = 1; i <= 205; i++) store.createSession({ name: `s${i}`, transport: 'stdio', command: '["x"]', cwd: '/', pid: null, started_at: 0 });
+    const ui = await startUiServer({ store, port: 0, staticDir: null });
+
+    const newest = (await (await fetch(`${ui.url}/api/sessions`)).json()) as SessionSummary[];
+    expect(newest).toHaveLength(200);
+    const older = (await (await fetch(`${ui.url}/api/sessions?before=${newest.at(-1)!.id}`)).json()) as SessionSummary[];
+    expect(older.map((session) => session.name)).toEqual(['s5', 's4', 's3', 's2', 's1']);
+
+    await ui.close();
+    store.close();
+  });
+
+  it('joins a paged tool list for diffs, and only when asked', async () => {
+    const store = new Store(':memory:');
+    const sessionId = store.createSession({ name: 'paged', transport: 'stdio', command: '["x"]', cwd: '/', pid: 1, started_at: 0 });
+    const recorder = new Recorder(store, sessionId);
+    const [firstRequest] = recorder.frame('client', '{"jsonrpc":"2.0","id":1,"method":"tools/list"}');
+    recorder.frame('server', '{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"a","inputSchema":{"type":"object"}}],"nextCursor":"2"}}');
+    const [secondRequest] = recorder.frame('client', '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{"cursor":"2"}}');
+    recorder.frame('server', '{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"b","inputSchema":{"type":"object"}}]}}');
+    const ui = await startUiServer({ store, port: 0, staticDir: null });
+    const tools = async (path: string) => {
+      const detail = (await (await fetch(ui.url + path)).json()) as MessageDetail;
+      return (JSON.parse(detail.response!.payload) as { result: { tools: { name: string }[] } }).result.tools.map((tool) => tool.name);
+    };
+
+    expect(await tools(`/api/messages/${firstRequest}`)).toEqual(['a']);
+    expect(await tools(`/api/messages/${firstRequest}?listing`)).toEqual(['a', 'b']);
+    expect(await tools(`/api/messages/${secondRequest}?listing`)).toEqual(['b']);
+
+    await ui.close();
+    store.close();
+  });
+});
+
 describe('UI server replay', () => {
   it('replays from the UI and refuses anything that could be cross-site', async () => {
     const store = new Store(':memory:');

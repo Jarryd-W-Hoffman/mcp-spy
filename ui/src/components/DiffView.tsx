@@ -16,8 +16,9 @@ export function DiffView({ baseId, targetId }: Props) {
     let cancelled = false;
     setDetails(null);
     setError(null);
+    // ?listing: a tool list sent in pages is compared as a whole, not first page to first page.
     const load = (id: number) =>
-      fetch(`/api/messages/${id}`).then(async (response) => {
+      fetch(`/api/messages/${id}?listing`).then(async (response) => {
         if (!response.ok) throw new Error(`message #${id}: HTTP ${response.status}`);
         return (await response.json()) as MessageDetail;
       });

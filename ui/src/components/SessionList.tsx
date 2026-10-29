@@ -5,9 +5,12 @@ interface Props {
   sessions: SessionSummary[];
   selected: number | null;
   onSelect(id: number | null): void;
+  /** Whether there may be older sessions than those listed. */
+  more: boolean;
+  onShowOlder(): void;
 }
 
-export function SessionList({ sessions, selected, onSelect }: Props) {
+export function SessionList({ sessions, selected, onSelect, more, onShowOlder }: Props) {
   const total = sessions.reduce((sum, session) => sum + session.message_count, 0);
 
   return (
@@ -44,6 +47,11 @@ export function SessionList({ sessions, selected, onSelect }: Props) {
           </button>
         );
       })}
+      {more && (
+        <button className="text-button sessions-more" onClick={onShowOlder}>
+          Show older sessions
+        </button>
+      )}
       {sessions.length === 0 && (
         <p className="empty-hint">
           No sessions yet. Wrap a server with <code>mcpspy run -- &lt;command&gt;</code>, or proxy one with <code>mcpspy proxy &lt;url&gt;</code>.
