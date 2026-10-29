@@ -1,4 +1,5 @@
 import { classifyFrame, requestsLaterPage } from './jsonrpc.js';
+import { Redactor } from './redact.js';
 import { contextCost } from './tokens.js';
 import { calledTool, checkMessage, SessionValidator } from './validate.js';
 import type { Direction, NewMessage, Store } from './store.js';
@@ -26,6 +27,8 @@ export class Recorder {
     private readonly store: Store,
     readonly sessionId: number,
     private readonly now: () => number = () => performance.timeOrigin + performance.now(),
+    /** Applied to everything recorded, before it reaches the log. */
+    private readonly redactor: Redactor = new Redactor(),
   ) {}
 
   /**
@@ -49,6 +52,7 @@ export class Recorder {
     const ids: number[] = [];
 
     for (const message of classifyFrame(line)) {
+      message.json = this.redactor.json(message.json);
       let requestId: number | null = null;
       let latency: number | null = null;
       let method = message.method;
@@ -106,7 +110,7 @@ export class Recorder {
       kind: 'log',
       method: null,
       rpc_id: null,
-      payload: line,
+      payload: this.redactor.text(line),
       problem: null,
       request_id: null,
       latency_ms: null,

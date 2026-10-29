@@ -4,6 +4,7 @@ import type { AddressInfo } from 'node:net';
 import { createBrotliDecompress, createGunzip, createInflate } from 'node:zlib';
 import type { MockEngine } from '../mocks.js';
 import { Recorder } from '../recorder.js';
+import { Redactor } from '../redact.js';
 import { isLoopbackHost } from '../server.js';
 import { formatSseEvent, SseParser, type SseEvent } from '../sse.js';
 import type { Store } from '../store.js';
@@ -23,6 +24,8 @@ export interface HttpProxyOptions {
    * Authorization token, so the agent needn't log in). Never recorded.
    */
   headers?: Record<string, string>;
+  /** What to remove from the record; built-in secret patterns by default. */
+  redactor?: Redactor;
   warn?: (message: string) => void;
 }
 
@@ -54,6 +57,7 @@ interface Tracked {
  */
 export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpProxy> {
   const upstream = new URL(options.upstream);
+  const redactor = options.redactor ?? new Redactor();
   if (upstream.protocol !== 'http:' && upstream.protocol !== 'https:') throw new Error(`${options.upstream} is not an http(s) URL`);
   const { store, mocks = null } = options;
   const warn = options.warn ?? ((message: string) => process.stderr.write(`[mcpspy] ${message}\n`));
@@ -82,12 +86,12 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
     const sessionId = store.createSession({
       name: options.name ?? upstream.host,
       transport,
-      command: JSON.stringify([upstream.href]),
+      command: JSON.stringify([redactor.text(upstream.href)]),
       cwd: process.cwd(),
       pid: null,
       started_at: Date.now(),
     });
-    const tracked = { sessionId, recorder: new Recorder(store, sessionId), open: true };
+    const tracked = { sessionId, recorder: new Recorder(store, sessionId, undefined, redactor), open: true };
     all.push(tracked);
     return tracked;
   };
