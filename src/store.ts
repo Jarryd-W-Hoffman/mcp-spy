@@ -369,9 +369,73 @@ export class Store {
     return row?.id ?? 0;
   }
 
+  /**
+   * Every session with when it was last active (its last message, else its end
+   * or start) and the payload bytes it holds, most recently active first.
+   */
+  sessionFootprints(): SessionFootprint[] {
+    return this.db
+      .prepare(
+        `SELECT s.id, s.name, s.started_at, s.ended_at, s.message_count,
+                max(coalesce((SELECT ts FROM messages m WHERE m.session_id = s.id ORDER BY m.id DESC LIMIT 1), 0),
+                    coalesce(s.ended_at, 0), s.started_at) AS last_active,
+                coalesce(b.bytes, 0) AS bytes
+         FROM sessions s
+         LEFT JOIN (SELECT session_id, sum(size) AS bytes FROM messages GROUP BY session_id) b ON b.session_id = s.id
+         ORDER BY last_active DESC, s.id DESC`,
+      )
+      .all() as unknown as SessionFootprint[];
+  }
+
+  /**
+   * Deletes a batch of a session's messages, newest first (a response refers to
+   * the request before it), and the session itself once they're gone. Returns
+   * true when the session is gone. One short transaction per batch, so other
+   * processes recording to the log wait only briefly.
+   */
+  deleteSessionBatch(id: number, batch = 500): boolean {
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      const { changes } = this.db
+        .prepare('DELETE FROM messages WHERE id IN (SELECT id FROM messages WHERE session_id = ? ORDER BY id DESC LIMIT ?)')
+        .run(id, batch);
+      if (changes === 0) this.db.prepare('DELETE FROM sessions WHERE id = ?').run(id);
+      this.db.exec('COMMIT');
+      return changes === 0;
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    }
+  }
+
+  /** The log's size on disk, and how much of it is free pages that new recordings reuse. */
+  size(): { fileBytes: number; freeBytes: number } {
+    const pragma = (name: string) => (this.db.prepare(`PRAGMA ${name}`).get() as Record<string, number>)[name]!;
+    const pageSize = pragma('page_size');
+    return { fileBytes: pragma('page_count') * pageSize, freeBytes: pragma('freelist_count') * pageSize };
+  }
+
+  /** Rewrites the log without its free pages, shrinking the file. Locks it while it runs. */
+  vacuum(): void {
+    this.db.exec('VACUUM');
+    this.db.exec('PRAGMA wal_checkpoint(TRUNCATE)');
+  }
+
   close(): void {
     this.db.close();
   }
+}
+
+export interface SessionFootprint {
+  id: number;
+  name: string | null;
+  started_at: number;
+  ended_at: number | null;
+  message_count: number;
+  /** When the session last recorded anything (ms since the epoch). */
+  last_active: number;
+  /** Payload bytes of its messages. */
+  bytes: number;
 }
 
 /** A session's tool list, joined from however many pages the server sent it in. */

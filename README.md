@@ -352,6 +352,7 @@ Patterns can't catch everything, such as a password in free text with nothing ar
 | `mcpspy diff <id> <id>` | Diff two messages, or two requests and their responses. |
 | `mcpspy replay <id> [--args <json> \| --params <json>] [--repeat <n>] [-e K=V] [-H 'Name: value']` | Re-run a recorded request against a fresh server (or session) and diff the response. |
 | `mcpspy suite add <file> <id>...` / `mcpspy suite run <file> [--update] [-H …]` | Save recorded calls as a regression suite, and run it. |
+| `mcpspy prune [--older-than 30d] [--keep <n>] [--max-size 500MB] [--dry-run] [--vacuum]` | Delete old sessions so the log stops growing; `MCPSPY_RETENTION` makes `mcpspy ui` do it daily. |
 | `mcpspy validate [--session <id>]` | List schema and protocol issues; exits 1 if there are errors. |
 | `mcpspy mock serve <file>` / `mcpspy mock add <file> <id>...` | Run a stand-in server from mock rules; turn recorded calls into rules. |
 
@@ -543,7 +544,26 @@ echo                            3      20      26
 get-sum                         3      10      64
 ```
 
-For a pipeline instead, `mcpspy tail --json` prints the same rows as NDJSON. Delete the file to start over.
+For a pipeline instead, `mcpspy tail --json` prints the same rows as NDJSON.
+
+### Keeping it small
+
+The log keeps everything until you prune it. A busy day of agent work can record thousands of messages, so trim it now and then:
+
+```sh
+mcpspy prune --older-than 30d --dry-run   # list what would be deleted
+mcpspy prune --older-than 30d             # delete sessions last active over 30 days ago
+mcpspy prune --keep 200                   # keep the 200 most recently active sessions
+mcpspy prune --max-size 500MB             # delete the oldest sessions until the log fits
+```
+
+Or set `MCPSPY_RETENTION` to an age, a size, or both (`30d`, `1GB`, `30d,1GB`). `mcpspy ui` then prunes when it starts and once a day while it runs.
+
+- **Running sessions are safe.** A session's age counts from its last activity, and one that hasn't ended and recorded something in the last hour is never deleted.
+- **Proxies keep recording.** Deletion runs in small batches with pauses in between, so proxies writing to the same log wait at most a moment. On a million-message log, a concurrent writer's slowest insert during a prune took 80 ms.
+- **Freed space is reused.** New recordings fill it, so the file stops growing, but it doesn't shrink on its own. Add `--vacuum` to shrink it now. That locks the log briefly and needs free disk space about the size of the log, so run it when no agent is busy.
+
+Or delete the file to start over.
 
 ## How it's built
 

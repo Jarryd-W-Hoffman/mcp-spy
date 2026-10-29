@@ -18,6 +18,7 @@ import {
 } from './format.js';
 import { MockEngine, parseMockFile, rulesFromRecording, type MockFile, type MockTool } from './mocks.js';
 import { startHttpProxy, type HttpProxy } from './proxy/http.js';
+import { applyPrune, parseAge, parseRetention, parseSize, planPrune, type PruneRules } from './prune.js';
 import { compilePatterns, Redactor } from './redact.js';
 import { runMockServer } from './proxy/mock-server.js';
 import { runStdioProxy } from './proxy/stdio.js';
@@ -54,6 +55,7 @@ Usage:
   mcpspy mock add <file> <message-id>...     turn recorded calls into mock rules
   mcpspy wrap [<config>] [--only <name>]... [--dry-run] [--command <path>] [--db <path>] [--mocks <file>]
   mcpspy unwrap [<config>] [--only <name>]... [--dry-run]
+  mcpspy prune [--older-than <30d>] [--keep <n>] [--max-size <500MB>] [--dry-run] [--vacuum] [--db <path>]
 
 mcpspy wrap puts mcpspy in front of every stdio server in an MCP config
 (.mcp.json by default; also .cursor/mcp.json, .vscode/mcp.json,
@@ -76,6 +78,8 @@ values of keys such as password, token, api_key and authorization. Add your own
 patterns with --redact <regex>, or turn the built-in ones off with --no-redact.
 
 The log is a SQLite database at ${defaultDbPath()} (override with --db or MCPSPY_DB).
+It grows until you prune it: mcpspy prune deletes old sessions, or set
+MCPSPY_RETENTION (e.g. 30d, 1GB or 30d,1GB) and mcpspy ui prunes daily.
 Nothing leaves your machine, except with tokens --exact, which sends the recorded
 tool definitions and results to Anthropic's count_tokens API.`;
 
@@ -129,6 +133,8 @@ async function main(argv: string[]): Promise<void> {
       return mockCommand(rest);
     case 'proxy':
       return proxyCommand(rest);
+    case 'prune':
+      return prune(rest);
     case 'wrap':
       return wrapCommand(rest, 'wrap');
     case 'unwrap':
@@ -833,6 +839,101 @@ async function suiteCommand(argv: string[]): Promise<void> {
   if (counts.fail > 0 || counts.error > 0) process.exitCode = 1;
 }
 
+async function prune(argv: string[]): Promise<void> {
+  const { values } = parseArgs({
+    args: argv,
+    options: {
+      'older-than': { type: 'string' },
+      keep: { type: 'string' },
+      'max-size': { type: 'string' },
+      'dry-run': { type: 'boolean' },
+      vacuum: { type: 'boolean' },
+      db: { type: 'string' },
+    },
+  });
+  const rules: PruneRules = {};
+  try {
+    if (values['older-than'] !== undefined) rules.olderThanMs = parseAge(values['older-than']);
+    if (values['max-size'] !== undefined) rules.maxBytes = parseSize(values['max-size']);
+  } catch (error) {
+    fail((error as Error).message);
+  }
+  if (values.keep !== undefined) rules.keep = parseId(values.keep, '--keep');
+  if (Object.keys(rules).length === 0 && !values.vacuum) {
+    fail('prune needs --older-than <age>, --keep <n> or --max-size <size> (or --vacuum on its own)');
+  }
+
+  const store = new Store(values.db);
+  const style = styleFor(process.stdout);
+  const out = (line = '') => process.stdout.write(`${line}\n`);
+  const describeSize = () => {
+    const { fileBytes, freeBytes } = store.size();
+    return `${formatBytes(fileBytes)}${freeBytes > 0 ? style.dim(` (${formatBytes(freeBytes)} free for reuse)`) : ''}`;
+  };
+  out(`Log: ${values.db ?? defaultDbPath()}, ${describeSize()}`);
+
+  if (Object.keys(rules).length > 0) {
+    const plan = planPrune(store, rules);
+    const what = `${plan.sessions.length} of ${plan.total} ${plan.total === 1 ? 'session' : 'sessions'} (${plan.messages} messages, about ${formatBytes(plan.bytes)})`;
+    if (plan.sessions.length === 0) out('Nothing to prune.');
+    else if (values['dry-run']) out(`Would delete ${what}:`);
+    for (const session of values['dry-run'] ? plan.sessions.slice(0, 20) : []) {
+      const when = `${new Date(session.last_active).toISOString().slice(0, 10)} ${formatClock(session.last_active)}`;
+      out(`  ${style.dim(`#${session.id}`.padEnd(6))} ${(session.name ?? '-').padEnd(16)} last active ${when}  ${session.message_count} messages`);
+    }
+    if (values['dry-run'] && plan.sessions.length > 20) out(style.dim(`  … and ${plan.sessions.length - 20} more`));
+    if (plan.running > 0) out(style.dim(`Keeping ${plan.running} matching ${plan.running === 1 ? 'session' : 'sessions'} that may still be running.`));
+    if (values['dry-run']) {
+      out(style.dim('Dry run: nothing deleted.'));
+      store.close();
+      return;
+    }
+    if (plan.sessions.length > 0) {
+      await applyPrune(store, plan);
+      out(`Deleted ${what}.`);
+      if (!values.vacuum) out(style.dim('New recordings reuse the freed space; run with --vacuum to shrink the file now.'));
+    }
+  }
+
+  if (values.vacuum && !values['dry-run']) {
+    try {
+      store.vacuum();
+      out(`Vacuumed: ${describeSize()}`);
+    } catch (error) {
+      store.close();
+      fail(`couldn't vacuum the log (${(error as Error).message}); try again when no proxies are recording`);
+    }
+  }
+  store.close();
+}
+
+/**
+ * Prunes the log by MCPSPY_RETENTION when mcpspy ui starts, then daily. Not
+ * done by run or proxy: deleting would hold up the traffic they forward.
+ */
+function retainByEnvironment(store: Store): void {
+  const setting = process.env.MCPSPY_RETENTION;
+  if (!setting) return;
+  let rules: PruneRules;
+  try {
+    rules = parseRetention(setting);
+  } catch (error) {
+    fail(`MCPSPY_RETENTION: ${(error as Error).message}`);
+  }
+  const run = async () => {
+    try {
+      const plan = planPrune(store, rules);
+      if (plan.sessions.length === 0) return;
+      await applyPrune(store, plan);
+      process.stdout.write(`Pruned ${plan.sessions.length} old ${plan.sessions.length === 1 ? 'session' : 'sessions'} (MCPSPY_RETENTION=${setting})\n`);
+    } catch (error) {
+      process.stderr.write(`[mcpspy] pruning failed: ${(error as Error).message}\n`);
+    }
+  };
+  void run();
+  setInterval(() => void run(), 24 * 60 * 60 * 1000).unref();
+}
+
 function wrapCommand(argv: string[], mode: 'wrap' | 'unwrap'): void {
   const { values, positionals } = parseArgs({
     args: argv,
@@ -947,6 +1048,7 @@ async function ui(argv: string[]): Promise<void> {
   });
 
   const store = new Store(values.db);
+  retainByEnvironment(store);
   const staticDir = resolveUiDir();
   const server = await startUiServer({ store, port: parseId(values.port, '--port'), staticDir, readOnly: values['read-only'] }).catch((error: NodeJS.ErrnoException) => {
     if (error.code === 'EADDRINUSE') fail(`port ${values.port} is in use; pick another with --port`);
