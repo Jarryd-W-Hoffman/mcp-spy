@@ -18,6 +18,7 @@ import {
 } from './format.js';
 import { MockEngine, parseMockFile, rulesFromRecording, type MockFile, type MockTool } from './mocks.js';
 import { startHttpProxy, type HttpProxy } from './proxy/http.js';
+import { compilePatterns, Redactor } from './redact.js';
 import { runMockServer } from './proxy/mock-server.js';
 import { runStdioProxy } from './proxy/stdio.js';
 import { calledTool } from './validate.js';
@@ -34,9 +35,10 @@ import { unwrapConfig, wrapConfig, type WrapChange } from './wrap.js';
 const HELP = `mcpspy - see what your AI agent and its MCP servers say to each other
 
 Usage:
-  mcpspy run [--name <label>] [--mocks <file>] [--db <path>] -- <command> [args...]
+  mcpspy run [--name <label>] [--mocks <file>] [--redact <regex>]... [--no-redact] [--db <path>] -- <command> [args...]
   mcpspy -- <command> [args...]            shorthand for run
   mcpspy proxy <url> [--port <7800>] [--name <label>] [--mocks <file>] [-H 'Name: value']...
+                                           [--redact <regex>]... [--no-redact]
                                            proxy an MCP server over HTTP (Streamable HTTP or SSE)
   mcpspy tail [-f] [-n <count>] [--session <id>] [--json] [--db <path>]
   mcpspy sessions [--limit <n>] [--db <path>]
@@ -67,6 +69,11 @@ pass a token with -H "Authorization: Bearer $TOKEN": the proxy adds it to every
 request, so the agent doesn't need to log in.
 
 Then watch the traffic with: mcpspy ui --open (or mcpspy tail -f in a terminal)
+
+Secrets are removed before anything is recorded: well-known token formats
+(GitHub, Anthropic, OpenAI, AWS, Slack, Stripe, Google, JWTs, Bearer …), and the
+values of keys such as password, token, api_key and authorization. Add your own
+patterns with --redact <regex>, or turn the built-in ones off with --no-redact.
 
 The log is a SQLite database at ${defaultDbPath()} (override with --db or MCPSPY_DB).
 Nothing leaves your machine, except with tokens --exact, which sends the recorded
@@ -137,11 +144,12 @@ async function run(argv: string[]): Promise<void> {
 
   const { values } = parseArgs({
     args: argv.slice(0, separator),
-    options: { name: { type: 'string' }, mocks: { type: 'string' }, db: { type: 'string' } },
+    options: { name: { type: 'string' }, mocks: { type: 'string' }, db: { type: 'string' }, ...REDACT_OPTIONS },
   });
   const [command, ...args] = argv.slice(separator + 1) as [string, ...string[]];
 
   const mocks = values.mocks !== undefined ? loadMocks(values.mocks, values.name ?? null) : undefined;
+  const redactor = makeRedactor(values);
   let store: Store;
   try {
     store = new Store(values.db);
@@ -150,7 +158,7 @@ async function run(argv: string[]): Promise<void> {
     process.stderr.write(`[mcpspy] can't open the log at ${values.db ?? defaultDbPath()} (${(error as Error).message}); proxying without recording\n`);
     store = new Store(':memory:');
   }
-  const { exitCode } = await runStdioProxy({ command, args, store, name: values.name ?? null, mocks });
+  const { exitCode } = await runStdioProxy({ command, args, store, name: values.name ?? null, mocks, redactor });
   store.close();
 
   // stdin may still be open (the agent closed nothing); don't let it hold us up.
@@ -169,6 +177,7 @@ async function proxyCommand(argv: string[]): Promise<void> {
       mocks: { type: 'string' },
       header: { type: 'string', multiple: true, short: 'H' },
       db: { type: 'string' },
+      ...REDACT_OPTIONS,
     },
   });
   if (positionals.length !== 1) fail('proxy needs the server URL, e.g. mcpspy proxy https://mcp.example.com/mcp');
@@ -178,10 +187,11 @@ async function proxyCommand(argv: string[]): Promise<void> {
 
   const mocks = values.mocks !== undefined ? loadMocks(values.mocks, values.name ?? null) : undefined;
   const headers = parseHeaders(values.header);
+  const redactor = makeRedactor(values);
   const store = new Store(values.db);
   let proxy: HttpProxy;
   try {
-    proxy = await startHttpProxy({ upstream: positionals[0]!, store, name: values.name ?? null, host: values.host, port, mocks, headers });
+    proxy = await startHttpProxy({ upstream: positionals[0]!, store, name: values.name ?? null, host: values.host, port, mocks, headers, redactor });
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
     fail(code === 'EADDRINUSE' ? `port ${port} is in use; pick another with --port` : (error as Error).message);
@@ -200,6 +210,20 @@ async function proxyCommand(argv: string[]): Promise<void> {
   };
   process.once('SIGINT', stop);
   process.once('SIGTERM', stop);
+}
+
+const REDACT_OPTIONS = {
+  redact: { type: 'string', multiple: true },
+  'no-redact': { type: 'boolean' },
+} as const;
+
+/** The redactor for --redact <regex>... and --no-redact (which turns off only the built-in patterns). */
+function makeRedactor(values: { redact?: string[]; 'no-redact'?: boolean }): Redactor {
+  try {
+    return new Redactor({ builtIn: !values['no-redact'], patterns: compilePatterns(values.redact ?? []) });
+  } catch (error) {
+    fail((error as Error).message);
+  }
 }
 
 function loadMocks(path: string, serverName: string | null): MockEngine {

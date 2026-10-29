@@ -1,4 +1,5 @@
 import { Recorder } from './recorder.js';
+import { REDACTED } from './redact.js';
 import { HttpRpcClient } from './http-client.js';
 import { RpcClient, RpcError, StdioRpcClient, type JsonRpcReply } from './rpc-client.js';
 import type { Store } from './store.js';
@@ -80,6 +81,15 @@ export async function replay(options: ReplayOptions): Promise<ReplayResult> {
   const overHttp = transport === 'http' || transport === 'sse';
 
   const [command, ...args] = JSON.parse(session.command) as [string, ...string[]];
+  if ([command, ...args].some((part) => part.includes(REDACTED))) {
+    throw new ReplayError(
+      `the server's ${overHttp ? 'URL' : 'command line'} held a secret, which mcpspy didn't record, so it can't be reached again. ` +
+        `Pass the secret ${overHttp ? 'in a header (-H)' : 'in an environment variable'} instead, or record with --no-redact.`,
+    );
+  }
+  if (options.params === undefined && request.payload.includes(REDACTED)) {
+    throw new ReplayError(`request ${request.id} held a secret, which mcpspy didn't record; pass its arguments with --args (or --params)`);
+  }
   const env = { ...process.env, ...options.env };
   const params = options.params !== undefined ? options.params : (JSON.parse(request.payload) as { params?: unknown }).params;
 

@@ -3,6 +3,7 @@ import { constants } from 'node:os';
 import type { Readable, Writable } from 'node:stream';
 import { LineSplitter } from '../framing.js';
 import { Recorder } from '../recorder.js';
+import { Redactor } from '../redact.js';
 import type { MockEngine } from '../mocks.js';
 import { Store } from '../store.js';
 
@@ -21,6 +22,8 @@ export interface StdioProxyOptions {
   forwardSignals?: NodeJS.Signals[];
   /** Mock rules; when set, traffic is handled line by line so requests can be intercepted. */
   mocks?: MockEngine;
+  /** What to remove from the record; built-in secret patterns by default. */
+  redactor?: Redactor;
 }
 
 export interface StdioProxyResult {
@@ -44,10 +47,11 @@ export function runStdioProxy(options: StdioProxyOptions): Promise<StdioProxyRes
   } = options;
   const cwd = options.cwd ?? process.cwd();
 
+  const redactor = options.redactor ?? new Redactor();
   const session = {
     name: options.name ?? null,
     transport: 'stdio',
-    command: JSON.stringify([command, ...args]),
+    command: JSON.stringify([command, ...args].map((part) => redactor.text(part))),
     cwd,
     pid: null,
     started_at: Date.now(),
@@ -65,7 +69,7 @@ export function runStdioProxy(options: StdioProxyOptions): Promise<StdioProxyRes
     store = new Store(':memory:');
     sessionId = store.createSession(session);
   }
-  const recorder = new Recorder(store, sessionId);
+  const recorder = new Recorder(store, sessionId, undefined, redactor);
 
   let recordingBroken = false;
   const record = (fn: () => void): void => {

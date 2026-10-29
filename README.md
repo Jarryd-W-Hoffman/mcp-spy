@@ -319,14 +319,31 @@ Mocked responses are recorded like real ones, and labelled with the rule that pr
     <img src="docs/mocks.png" alt="A mocked get-forecast call: the detail pane says which rule answered it, and mock badges mark the other mocked rows." width="900">
 </p>
 
+### 🔒 Secrets
+
+mcpspy removes secrets from what it records, before anything reaches the log. The agent and server still exchange the real values, because only the record changes.
+
+- **Known formats**, wherever they appear: GitHub, Anthropic, OpenAI, AWS, Slack, Stripe and Google keys, JWTs, `Bearer …` and `Basic …` credentials, private key blocks, `user:password@` in URLs, and secrets in query strings (`?api_key=…`).
+- **Secret keys** in JSON: the values of `password`, `secret`, `token`, `access_token`, `api_key`, `authorization`, `cookie`, `private_key` and similar keys. Keys only match whole, so `progressToken` and `max_tokens` are kept.
+- **Command lines** and HTTP URLs of servers, and stderr lines.
+
+```sh
+mcpspy run --redact 'acct-\d+' -- my-server     # also remove your own patterns
+mcpspy run --no-redact -- my-server             # turn the built-in patterns off
+```
+
+Both options work on `run` and `proxy`, and `--redact` can be repeated. A payload that held a secret is stored with `[REDACTED]` in its place, so replaying it would send that instead. Replay stops and explains: pass new arguments with `--args`. Replay can't restart a server whose command line held a secret either. Pass the secret in an environment variable or, over HTTP, a header (`-H`).
+
+Patterns can't catch everything, such as a password in free text with nothing around it to recognise. Treat the log as sensitive anyway.
+
 ### Command reference
 
 | Command | What it does |
 | --- | --- |
 | `mcpspy wrap [<config>] [--only <name>] [--dry-run] [--command <path>]` | Put mcpspy in front of the stdio servers in an MCP config (`.mcp.json` by default). |
 | `mcpspy unwrap [<config>] [--only <name>] [--dry-run]` | Take it out again, restoring each server's command and args. |
-| `mcpspy run [--name <label>] [--mocks <file>] -- <cmd> [args…]` | Start a stdio server behind the proxy. `mcpspy -- <cmd>` is shorthand. |
-| `mcpspy proxy <url> [--port 7800] [--name <label>] [--mocks <file>] [-H 'Name: value']` | Proxy a server reached over HTTP (Streamable HTTP or HTTP+SSE). `-H` adds a header, such as a token, to every request. |
+| `mcpspy run [--name <label>] [--mocks <file>] [--redact <regex>] [--no-redact] -- <cmd> [args…]` | Start a stdio server behind the proxy. `mcpspy -- <cmd>` is shorthand. |
+| `mcpspy proxy <url> [--port 7800] [--name <label>] [--mocks <file>] [-H 'Name: value']` | Proxy a server reached over HTTP (Streamable HTTP or HTTP+SSE). `-H` adds a header, such as a token, to every request. Takes `--redact` and `--no-redact` like `run`. |
 | `mcpspy ui [--port 7777] [--open] [--read-only]` | Serve the web inspector on localhost. `--read-only` turns replay off. |
 | `mcpspy tail [-f] [-n 50] [--session <id>] [--json]` | Print recorded messages; `-f` follows new ones, `--json` prints NDJSON rows. |
 | `mcpspy sessions [--limit 20]` | List recorded sessions with their status and message count. |
@@ -488,6 +505,7 @@ Recorded traffic often holds secrets: tokens in tool arguments, private document
 
 - **Only localhost.** The UI and the HTTP proxy bind to `127.0.0.1` and refuse requests whose `Host` isn't a loopback name, which stops DNS-rebinding attacks from a web page. The proxy also refuses a non-local `Origin`.
 - **Replay can't be triggered cross-site.** Replay starts processes, so its endpoint also requires a custom header and a JSON body. A cross-site request can't send those without a CORS preflight, and mcpspy never approves one. It also checks `Origin` and `Sec-Fetch-Site`. `mcpspy ui --read-only` turns replay off entirely.
+- **Secrets are removed before they're stored.** Well-known credential formats and the values of secret-sounding keys are replaced with `[REDACTED]` in everything recorded. See [Secrets](#-secrets).
 - **Names, not values.** For stdio servers, mcpspy stores the names of environment variables (so replay can say which are missing), never their values. Over HTTP, headers are never stored at all.
 - **Opt-in network calls.** Nothing is sent anywhere unless you run `mcpspy tokens --exact`, which says so in its help.
 
