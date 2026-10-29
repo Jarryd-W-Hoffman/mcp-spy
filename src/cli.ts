@@ -36,7 +36,7 @@ const HELP = `mcpspy - see what your AI agent and its MCP servers say to each ot
 Usage:
   mcpspy run [--name <label>] [--mocks <file>] [--db <path>] -- <command> [args...]
   mcpspy -- <command> [args...]            shorthand for run
-  mcpspy proxy <url> [--port <7800>] [--name <label>] [--mocks <file>]
+  mcpspy proxy <url> [--port <7800>] [--name <label>] [--mocks <file>] [-H 'Name: value']...
                                            proxy an MCP server over HTTP (Streamable HTTP or SSE)
   mcpspy tail [-f] [-n <count>] [--session <id>] [--json] [--db <path>]
   mcpspy sessions [--limit <n>] [--db <path>]
@@ -62,7 +62,9 @@ hand, each server's command becomes:
   "args": ["run", "--name", "github", "--", "npx", "-y", "@modelcontextprotocol/server-github"]
 
 For a server reached over HTTP, start mcpspy proxy <url> and give your agent
-the local URL it prints instead of the server's.
+the local URL it prints instead of the server's. If the server needs a login,
+pass a token with -H "Authorization: Bearer $TOKEN": the proxy adds it to every
+request, so the agent doesn't need to log in.
 
 Then watch the traffic with: mcpspy ui --open (or mcpspy tail -f in a terminal)
 
@@ -165,6 +167,7 @@ async function proxyCommand(argv: string[]): Promise<void> {
       host: { type: 'string', default: '127.0.0.1' },
       name: { type: 'string' },
       mocks: { type: 'string' },
+      header: { type: 'string', multiple: true, short: 'H' },
       db: { type: 'string' },
     },
   });
@@ -174,16 +177,20 @@ async function proxyCommand(argv: string[]): Promise<void> {
   if (!isLoopbackHost(values.host)) fail('--host must be a loopback address; recorded traffic can contain secrets');
 
   const mocks = values.mocks !== undefined ? loadMocks(values.mocks, values.name ?? null) : undefined;
+  const headers = parseHeaders(values.header);
   const store = new Store(values.db);
   let proxy: HttpProxy;
   try {
-    proxy = await startHttpProxy({ upstream: positionals[0]!, store, name: values.name ?? null, host: values.host, port, mocks });
+    proxy = await startHttpProxy({ upstream: positionals[0]!, store, name: values.name ?? null, host: values.host, port, mocks, headers });
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
     fail(code === 'EADDRINUSE' ? `port ${port} is in use; pick another with --port` : (error as Error).message);
   }
   const style = styleFor(process.stderr);
   process.stderr.write(`mcpspy proxying ${positionals[0]}\nPoint your agent at ${style.cyan(proxy.url)}\n`);
+  // Names only: the values are usually credentials.
+  const added = Object.keys(headers);
+  if (added.length > 0) process.stderr.write(style.dim(`Adding ${added.join(', ')} to every request (never recorded)\n`));
 
   const stop = () => {
     void proxy.close().then(() => {

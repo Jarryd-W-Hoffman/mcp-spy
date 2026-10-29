@@ -18,6 +18,11 @@ export interface HttpProxyOptions {
   /** 0 picks a free port. */
   port?: number;
   mocks?: MockEngine;
+  /**
+   * Headers to send upstream with every request, replacing the agent's (e.g. an
+   * Authorization token, so the agent needn't log in). Never recorded.
+   */
+  headers?: Record<string, string>;
   warn?: (message: string) => void;
 }
 
@@ -162,6 +167,7 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
     for (const [name, value] of Object.entries(req.headers)) {
       if (value !== undefined && endToEnd(req.headers, name) && name !== 'content-length') headers[name] = value;
     }
+    for (const [name, value] of Object.entries(options.headers ?? {})) headers[name.toLowerCase()] = value;
     headers['accept-encoding'] = 'identity'; // so bodies can be read on the way through
     if (body.length > 0) headers['content-length'] = String(body.length);
 
