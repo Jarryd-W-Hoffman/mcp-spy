@@ -5,28 +5,28 @@ import type { ToolsReport, ToolCallStats, ToolChange } from './types.js';
 
 /**
  * What a session's tools cost in context and how they behaved: per-tool
- * definition costs from the latest tools/list, call statistics, and how the
+ * definition costs from the latest tools/list (all its pages), call statistics, and how the
  * tool list differs from the previous session of the same server.
  */
 export function toolsReport(store: Store, sessionId: number): ToolsReport {
-  const list = store.latestReply(sessionId, 'tools/list');
+  const list = store.latestToolList(sessionId);
   const previous = store.previousSession(sessionId);
-  const previousList = previous ? store.latestReply(previous.id, 'tools/list') : undefined;
+  const previousList = previous ? store.latestToolList(previous.id) : undefined;
 
   return {
     sessionId,
     definitions: list
       ? {
-          messageId: list.id,
-          requestId: list.request_id,
-          total: list.tokens ?? 0,
-          tools: list.token_detail ? (JSON.parse(list.token_detail) as ToolCost[]) : [],
+          messageId: list.messageId,
+          requestId: list.requestId,
+          total: list.tokens,
+          tools: list.tokenDetail ? (JSON.parse(list.tokenDetail) as ToolCost[]) : [],
         }
       : null,
     calls: callStats(store, sessionId),
     previousSessionId: previousList ? previous!.id : null,
-    previousListMessageId: previousList?.id ?? null,
-    changes: list && previousList ? toolListChanges(previousList.payload, list.payload, previousList.token_detail, list.token_detail) : null,
+    previousListMessageId: previousList?.messageId ?? null,
+    changes: list && previousList ? toolListChanges(previousList.payload, list.payload, previousList.tokenDetail, list.tokenDetail) : null,
   };
 }
 

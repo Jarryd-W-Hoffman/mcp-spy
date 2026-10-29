@@ -35,6 +35,23 @@ function harness(store: Store, serverArgs: string[] = [], command = process.exec
   return { input, done, send, waitForLines, stdout: () => stdout, stderr: () => stderr };
 }
 
+describe('runStdioProxy when the log fails', () => {
+  // The agent started this process to reach its server; a broken log must not stop that.
+  it('still proxies, without recording, when the session cannot be written', async () => {
+    const broken = new Store(':memory:');
+    broken.close();
+    const proxy = harness(broken);
+    proxy.send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {} });
+    await proxy.waitForLines(1);
+    proxy.input.end();
+
+    const { exitCode } = await proxy.done;
+    expect(exitCode).toBe(0);
+    expect(JSON.parse(proxy.stdout().trim())).toMatchObject({ id: 1, result: { serverInfo: { name: 'echo-server' } } });
+    expect(proxy.stderr()).toContain('[mcpspy] not recording this session');
+  });
+});
+
 describe('runStdioProxy', () => {
   let store: Store;
   beforeEach(() => (store = new Store(':memory:')));

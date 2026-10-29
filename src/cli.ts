@@ -131,7 +131,14 @@ async function run(argv: string[]): Promise<void> {
   const [command, ...args] = argv.slice(separator + 1) as [string, ...string[]];
 
   const mocks = values.mocks !== undefined ? loadMocks(values.mocks, values.name ?? null) : undefined;
-  const store = new Store(values.db);
+  let store: Store;
+  try {
+    store = new Store(values.db);
+  } catch (error) {
+    // The agent started us to reach its server, and nobody sees a failure here but the agent.
+    process.stderr.write(`[mcpspy] can't open the log at ${values.db ?? defaultDbPath()} (${(error as Error).message}); proxying without recording\n`);
+    store = new Store(':memory:');
+  }
   const { exitCode } = await runStdioProxy({ command, args, store, name: values.name ?? null, mocks });
   store.close();
 
@@ -241,7 +248,7 @@ function parseMockFileOrFail(path: string): MockFile {
 
 /** The definition of a tool from the latest tools/list in a session. */
 function recordedTool(store: Store, sessionId: number, name: string): MockTool | undefined {
-  const list = store.latestReply(sessionId, 'tools/list');
+  const list = store.latestToolList(sessionId);
   if (!list) return undefined;
   const tools = (JSON.parse(list.payload) as { result?: { tools?: MockTool[] } }).result?.tools ?? [];
   return tools.find((tool) => tool.name === name);
@@ -445,7 +452,7 @@ async function tokens(argv: string[]): Promise<void> {
         const exact = cached
           ? (JSON.parse(cached.detail!) as Awaited<ReturnType<InstanceType<typeof ExactCounter>['toolDefinitions']>>)
           : await counter.toolDefinitions(
-              (JSON.parse(store.getMessage(report.definitions.messageId)!.payload) as { result: { tools: unknown[] } }).result.tools,
+              (JSON.parse(store.latestToolList(session.id)!.payload) as { result: { tools: unknown[] } }).result.tools,
             );
         if (!cached) {
           store.saveExactCount({ message_id: report.definitions.messageId, model: values.model, tokens: exact.total, detail: JSON.stringify(exact) });

@@ -8,7 +8,6 @@ import { buildExchanges, filterExchanges, type ExchangeFilter } from './exchange
 import { useLiveData } from './live';
 
 export function App() {
-  const { messages, sessions, connection } = useLiveData();
   const [filter, setFilter] = useState<ExchangeFilter>({
     sessionId: null,
     search: '',
@@ -17,6 +16,7 @@ export function App() {
     errorsOnly: false,
     issuesOnly: false,
   });
+  const { messages, sessions, connection } = useLiveData(filter.sessionId);
   const [selected, setSelected] = useState<number | null>(null);
   const [compareBase, setCompareBase] = useState<number | null>(null);
   const [view, setView] = useState<'traffic' | 'tools'>('traffic');
