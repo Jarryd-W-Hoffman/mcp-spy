@@ -21,7 +21,8 @@ CREATE TABLE IF NOT EXISTS sessions (
   exit_signal TEXT,
   replay_of INTEGER,
   env_keys TEXT,
-  checked INTEGER NOT NULL DEFAULT 0
+  checked INTEGER NOT NULL DEFAULT 0,
+  message_count INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS messages (
@@ -65,7 +66,26 @@ const MIGRATIONS: [table: string, column: string, definition: string][] = [
   ['messages', 'issues', 'TEXT'],
   ['sessions', 'checked', 'INTEGER NOT NULL DEFAULT 0'],
   ['messages', 'mock', 'TEXT'],
+  ['sessions', 'message_count', 'INTEGER NOT NULL DEFAULT 0'],
 ];
+
+/**
+ * Created after migrations, since they use columns that older logs gain there.
+ * The triggers keep sessions.message_count current for every writer, including
+ * older mcpspy versions sharing the log; the partial indexes hold only the rows
+ * that validate and the UI's startup backfill look for.
+ */
+const DERIVED = `
+CREATE TRIGGER IF NOT EXISTS messages_count_insert AFTER INSERT ON messages BEGIN
+  UPDATE sessions SET message_count = message_count + 1 WHERE id = NEW.session_id;
+END;
+CREATE TRIGGER IF NOT EXISTS messages_count_delete AFTER DELETE ON messages BEGIN
+  UPDATE sessions SET message_count = message_count - 1 WHERE id = OLD.session_id;
+END;
+CREATE INDEX IF NOT EXISTS messages_issues ON messages(id) WHERE issues IS NOT NULL;
+CREATE INDEX IF NOT EXISTS messages_missing_tokens ON messages(id)
+  WHERE tokens IS NULL AND kind IN ('response', 'error') AND method IN ('tools/list', 'tools/call', 'resources/read', 'prompts/get');
+`;
 
 const SQLITE_BUSY = 5;
 
@@ -127,8 +147,13 @@ export class Store {
     const columns = (table: string) =>
       new Set((this.db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[]).map((column) => column.name));
     for (const [table, column, definition] of MIGRATIONS) {
-      if (!columns(table).has(column)) this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+      if (columns(table).has(column)) continue;
+      this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+      if (column === 'message_count') {
+        this.db.exec('UPDATE sessions SET message_count = (SELECT COUNT(*) FROM messages m WHERE m.session_id = sessions.id)');
+      }
     }
+    this.db.exec(DERIVED);
   }
 
   createSession(
@@ -165,8 +190,7 @@ export class Store {
   listSessions(limit = 20): (SessionRow & { message_count: number })[] {
     return this.db
       .prepare(
-        `SELECT s.*, (SELECT COUNT(*) FROM messages m WHERE m.session_id = s.id) AS message_count
-         FROM sessions s ORDER BY s.id DESC LIMIT ?`,
+        `SELECT * FROM sessions ORDER BY id DESC LIMIT ?`,
       )
       .all(limit) as unknown as (SessionRow & { message_count: number })[];
   }
