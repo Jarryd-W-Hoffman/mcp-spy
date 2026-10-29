@@ -129,6 +129,14 @@ The server's stderr is recorded alongside its messages, which often explains fai
 
 Headers such as `Authorization` are forwarded but never recorded. Replays and suites against servers that need them take the headers on the command line: `mcpspy replay 42 -H "Authorization: Bearer $TOKEN"`.
 
+**Servers that need a login.** Logging in with OAuth through the proxy doesn't work. The login service issues a token for the real server's URL, and the agent rejects it because it's talking to the proxy's URL. Instead, give the proxy a token, such as a personal access token or an API key. The proxy adds it to every request, replacing whatever the agent sends, so the agent never needs to log in:
+
+```sh
+mcpspy proxy https://api.githubcopilot.com/mcp/ --name github -H "Authorization: Bearer $GITHUB_TOKEN"
+```
+
+The startup message names the headers the proxy adds, but never their values, and they're never recorded.
+
 ### 🪙 Context cost
 
 Every tool definition a server advertises is sent to the model with every request, and every tool result lands in the conversation. mcpspy estimates both:
@@ -318,7 +326,7 @@ Mocked responses are recorded like real ones, and labelled with the rule that pr
 | `mcpspy wrap [<config>] [--only <name>] [--dry-run] [--command <path>]` | Put mcpspy in front of the stdio servers in an MCP config (`.mcp.json` by default). |
 | `mcpspy unwrap [<config>] [--only <name>] [--dry-run]` | Take it out again, restoring each server's command and args. |
 | `mcpspy run [--name <label>] [--mocks <file>] -- <cmd> [args…]` | Start a stdio server behind the proxy. `mcpspy -- <cmd>` is shorthand. |
-| `mcpspy proxy <url> [--port 7800] [--name <label>] [--mocks <file>]` | Proxy a server reached over HTTP (Streamable HTTP or HTTP+SSE). |
+| `mcpspy proxy <url> [--port 7800] [--name <label>] [--mocks <file>] [-H 'Name: value']` | Proxy a server reached over HTTP (Streamable HTTP or HTTP+SSE). `-H` adds a header, such as a token, to every request. |
 | `mcpspy ui [--port 7777] [--open] [--read-only]` | Serve the web inspector on localhost. `--read-only` turns replay off. |
 | `mcpspy tail [-f] [-n 50] [--session <id>] [--json]` | Print recorded messages; `-f` follows new ones, `--json` prints NDJSON rows. |
 | `mcpspy sessions [--limit 20]` | List recorded sessions with their status and message count. |
@@ -563,6 +571,7 @@ ui/src/                 ← the React app
 ## Known limitations
 
 - **Not on npm yet.** Install from source for now.
+- **No OAuth login through `mcpspy proxy`.** The agent rejects a login for a URL other than the one it's using. Pass a token with `-H` instead; see [Servers over HTTP](#-servers-over-http).
 - **Replays from the UI can't send headers.** HTTP servers that need `Authorization` fail there with a 401 and a hint; use `mcpspy replay -H` instead.
 - **Mock rules apply to single requests.** Batched requests always go to the real server.
 - **Token estimates are estimates.** Use them to compare sizes, or `--exact` for real numbers.

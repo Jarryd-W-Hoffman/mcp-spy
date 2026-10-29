@@ -18,6 +18,11 @@ export interface HttpProxyOptions {
   /** 0 picks a free port. */
   port?: number;
   mocks?: MockEngine;
+  /**
+   * Headers to send upstream with every request, replacing the agent's (e.g. an
+   * Authorization token, so the agent needn't log in). Never recorded.
+   */
+  headers?: Record<string, string>;
   warn?: (message: string) => void;
 }
 
@@ -160,8 +165,9 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
 
     const headers: Record<string, string | string[]> = {};
     for (const [name, value] of Object.entries(req.headers)) {
-      if (value !== undefined && !HOP_BY_HOP.has(name) && name !== 'content-length') headers[name] = value;
+      if (value !== undefined && endToEnd(req.headers, name) && name !== 'content-length') headers[name] = value;
     }
+    for (const [name, value] of Object.entries(options.headers ?? {})) headers[name.toLowerCase()] = value;
     headers['accept-encoding'] = 'identity'; // so bodies can be read on the way through
     if (body.length > 0) headers['content-length'] = String(body.length);
 
@@ -184,7 +190,7 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
 
       const responseHeaders: Record<string, string | string[]> = {};
       for (const [name, value] of Object.entries(up.headers)) {
-        if (value !== undefined && !HOP_BY_HOP.has(name)) responseHeaders[name] = value;
+        if (value !== undefined && endToEnd(up.headers, name)) responseHeaders[name] = value;
       }
       const type = header(up.headers, 'content-type') ?? '';
       const encoding = header(up.headers, 'content-encoding');
@@ -304,6 +310,13 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
         server.close(() => resolve());
       }),
   };
+}
+
+/** Whether a header goes beyond this hop: not a standard hop-by-hop one, nor one the Connection header names. */
+function endToEnd(headers: IncomingHttpHeaders, name: string): boolean {
+  if (HOP_BY_HOP.has(name)) return false;
+  const connection = header(headers, 'connection');
+  return connection === null || !connection.split(',').some((listed) => listed.trim().toLowerCase() === name);
 }
 
 function header(headers: IncomingHttpHeaders, name: string): string | null {

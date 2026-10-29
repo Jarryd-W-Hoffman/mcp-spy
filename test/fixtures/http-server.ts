@@ -1,4 +1,4 @@
-import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
+import { createServer, type IncomingHttpHeaders, type IncomingMessage, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
 
 /**
@@ -6,10 +6,18 @@ import type { AddressInfo } from 'node:net';
  * (JSON or SSE replies, a GET stream, sessions); /sse + /messages speak the
  * legacy HTTP+SSE transport.
  */
-export async function startHttpFixture(): Promise<{ url: string; origin: string; close(): Promise<void>; deleted: string[] }> {
+export async function startHttpFixture(): Promise<{
+  url: string;
+  origin: string;
+  close(): Promise<void>;
+  deleted: string[];
+  /** The headers of every request received, in order. */
+  received: IncomingHttpHeaders[];
+}> {
   let nextSession = 1;
   const sessions = new Set<string>();
   const deleted: string[] = [];
+  const received: IncomingHttpHeaders[] = [];
   const waiting = new Map<string, (message: Record<string, unknown>) => void>();
   const legacyStreams = new Map<string, ServerResponse>();
   let origin = '';
@@ -31,6 +39,7 @@ export async function startHttpFixture(): Promise<{ url: string; origin: string;
   }
 
   const server = createServer(async (req, res) => {
+    received.push(req.headers);
     const url = new URL(req.url ?? '/', 'http://x');
     const body = await read(req);
     const message = body ? (JSON.parse(body) as Record<string, unknown>) : null;
@@ -110,6 +119,7 @@ export async function startHttpFixture(): Promise<{ url: string; origin: string;
     url: `${origin}/mcp`,
     origin,
     deleted,
+    received,
     close: () =>
       new Promise((resolve) => {
         server.closeAllConnections();

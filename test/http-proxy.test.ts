@@ -134,6 +134,42 @@ describe('HTTP proxy', () => {
     ]);
   });
 
+  it('adds configured headers to every forwarded request, and never records them', async () => {
+    proxy = await startHttpProxy({ upstream: fixture.url, store, port: 0, headers: { Authorization: 'Bearer secret-token', 'x-team': 'core' } });
+    const init = await fetch(proxy.url, {
+      method: 'POST',
+      // The agent's own credentials are replaced, so it never needs to log in.
+      headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream', authorization: 'Bearer agent' },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {} }),
+    });
+    expect(init.status).toBe(200);
+    const session = init.headers.get('mcp-session-id')!;
+    await post({ jsonrpc: '2.0', id: 2, method: 'tools/list' }, session);
+
+    expect(fixture.received.map((headers) => [headers.authorization, headers['x-team']])).toEqual([
+      ['Bearer secret-token', 'core'],
+      ['Bearer secret-token', 'core'],
+    ]);
+    const db = store['db'];
+    const everything = [db.prepare('SELECT * FROM sessions').all(), db.prepare('SELECT * FROM messages').all()];
+    expect(JSON.stringify(everything)).not.toContain('secret-token');
+  });
+
+  it('drops headers that the Connection header names as hop-by-hop', async () => {
+    proxy = await startHttpProxy({ upstream: fixture.url, store, port: 0 });
+    const { request } = await import('node:http');
+    await new Promise<void>((resolve, reject) => {
+      const body = JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {} });
+      const req = request(proxy.url, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', accept: 'application/json', connection: 'keep-alive, x-hop', 'x-hop': 'one hop only', 'x-end': 'kept' },
+      });
+      req.on('response', (res) => res.resume().on('end', resolve)).on('error', reject).end(body);
+    });
+    expect(fixture.received[0]).toMatchObject({ 'x-end': 'kept' });
+    expect(fixture.received[0]).not.toHaveProperty('x-hop');
+  });
+
   it('applies mock rules to HTTP traffic', async () => {
     const mocks = new MockEngine(null, null, () => {}, {
       tools: [{ name: 'weather', inputSchema: { type: 'object' } }],
