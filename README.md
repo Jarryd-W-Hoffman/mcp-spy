@@ -607,12 +607,49 @@ ui/src/                 ← the React app
 
 **Raw JSON-RPC instead of the MCP SDK for replays.** The SDK would rebuild requests its own way, and validate them. A replay has to send exactly what was recorded, or exactly your edit, even when that's invalid, because sometimes the invalid request is the bug you're chasing.
 
+## Performance
+
+mcpspy sits in the path of every message, so it has to be cheap. Here's how it behaves against a real server.
+
+### A real session
+
+[`bench/notes-server.mjs`](bench/notes-server.mjs) is a small notes server built with the official MCP SDK. It has seven tools, including one that's slow, one that can fail and one that takes a password, plus a resource. It runs over stdio or Streamable HTTP. [`bench/agent.mjs`](bench/agent.mjs) plays an agent's session against it: list tools and resources, search, save a note containing a GitHub token, read it back, ask for a note that doesn't exist, log in, summarise, and read a resource.
+
+Run through `mcpspy run` and `mcpspy proxy`, the agent got the same results as without mcpspy, over both transports:
+
+- **Every message was recorded:** 22 for the stdio session, including the server's stderr line, and 21 over HTTP. The latencies were right: the slow tool sleeps 150 ms and was recorded at 153 ms. The missing note was flagged as a tool error.
+- **No secrets were stored.** The GitHub token in the note, the password and the API key in the login reply appear nowhere in the log, including where the server echoed the token back. The agent still received every real value.
+- **Validation caught a confused agent.** [`bench/bad-agent.mjs`](bench/bad-agent.mjs) sends a string where an integer belongs, leaves out a required field, and misspells a tool name. `mcpspy validate` reported all three against the server's own schemas, with clearer messages than the server's errors.
+- **Replay** re-ran a recorded search with new arguments against a fresh copy of the server, three times, and diffed the result against the original.
+
+### Overhead
+
+[`bench/bench.mjs`](bench/bench.mjs) (`npm run bench`) sends the same workloads to the notes server directly and through mcpspy, over each transport. Medians of three runs on a laptop (8 × Intel i7-10510U, Node 24.21, Linux):
+
+| | p50 | p95 | p99 | calls/s, one at a time | calls/s, 64 at once | 100 KB result | 1 MB result | 5 MB result |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| stdio, direct | 0.17 ms | 0.80 ms | 0.94 ms | 4,258 | 29,047 | 1.2 ms | 17.6 ms | 175 ms |
+| stdio, through mcpspy | 0.33 ms | 0.68 ms | 1.29 ms | 2,662 | 6,657 | 3.2 ms | 42.7 ms | 383 ms |
+| HTTP, direct | 1.89 ms | 3.88 ms | 5.02 ms | 453 | 1,356 | 2.5 ms | 13.4 ms | 63 ms |
+| HTTP, through mcpspy | 2.74 ms | 6.49 ms | 8.27 ms | 286 | 1,286 | 7.8 ms | 52.8 ms | 485 ms |
+
+The latency columns are for `ping`, a tool that answers immediately, so they show mcpspy's overhead with nothing else in the way. What this means in practice:
+
+- **Typical calls gain under a millisecond:** about 0.2 ms over stdio and 1 ms over HTTP. An agent waits seconds for each model turn, so this is invisible.
+- **Throughput tops out at thousands of calls a second.** Through mcpspy, stdio handled about 6,600 calls a second with 64 in flight; recording each message is the limit. Agents make a few calls a second.
+- **Large results cost the most.** mcpspy parses each message, scans it for secrets, estimates its tokens and stores it. That adds about 25–40 ms to a 1 MB result, and 200–400 ms to a 5 MB one. Most of it is the secret scan: recording a 5 MB result took 130 ms, of which 80 ms was redaction and 32 ms the token estimate.
+- **Memory:** about 80 MB during 5,000 ordinary calls. It peaked at about 235 MB in the benchmark, while handling the 5 MB results.
+- **The log:** about 190 bytes per small message. The benchmark's 16,754 messages took 53 MB, nearly all of it the large reports. Use [`mcpspy prune`](#keeping-it-small) to keep it in check.
+
+Numbers vary from run to run and machine to machine; a laptop's clock speed alone moves them by tens of percent. Run `npm run bench` to measure yours.
+
 ## Known limitations
 
 - **Not on npm yet.** Install from source for now.
 - **No OAuth login through `mcpspy proxy`.** The agent rejects a login for a URL other than the one it's using. Pass a token with `-H` instead; see [Servers over HTTP](#-servers-over-http).
 - **Replays from the UI can't send headers.** HTTP servers that need `Authorization` fail there with a 401 and a hint; use `mcpspy replay -H` instead.
 - **Mock rules apply to single requests.** Batched requests always go to the real server.
+- **Very large results are slower to pass through.** A 5 MB result takes a few hundred milliseconds longer, mostly to scan it for secrets. See [Performance](#performance).
 - **Token estimates are estimates.** Use them to compare sizes, or `--exact` for real numbers.
 - **One log per machine by default.** Sessions from every project share `~/.mcpspy/mcpspy.db`; use `--db` or `MCPSPY_DB` to keep a project's traffic apart.
 
@@ -623,6 +660,7 @@ npm test              # Vitest
 npm run typecheck     # the CLI and the UI
 npm run build         # dist/ (CLI) and dist/ui (web UI)
 npm run dev -- tail   # run the CLI from source via tsx
+npm run bench         # overhead against a real MCP server (Linux; build first)
 
 # The UI with hot reload: the API on :7777, Vite on :5173 proxying /api to it
 npm run dev -- ui
