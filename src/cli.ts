@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { spawn } from 'node:child_process';
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
@@ -29,6 +29,7 @@ import { addCases, emptySuite, parseSuite, runSuite, updateExpectations, type Su
 import { formatTokens } from './tokens.js';
 import { defaultDbPath, Store, type MessageRow, type SessionRow } from './store.js';
 import type { Issue } from './types.js';
+import { unwrapConfig, wrapConfig, type WrapChange } from './wrap.js';
 
 const HELP = `mcpspy - see what your AI agent and its MCP servers say to each other
 
@@ -49,9 +50,13 @@ Usage:
   mcpspy validate [--session <id>] [--db <path>]
   mcpspy mock serve <file> [--name <label>]  a fake MCP server driven by mock rules
   mcpspy mock add <file> <message-id>...     turn recorded calls into mock rules
+  mcpspy wrap [<config>] [--only <name>]... [--dry-run] [--command <path>] [--db <path>] [--mocks <file>]
+  mcpspy unwrap [<config>] [--only <name>]... [--dry-run]
 
-Wrap a stdio MCP server by putting mcpspy in front of its command in your
-agent's MCP config, e.g. in .mcp.json:
+mcpspy wrap puts mcpspy in front of every stdio server in an MCP config
+(.mcp.json by default; also .cursor/mcp.json, .vscode/mcp.json,
+claude_desktop_config.json…), and mcpspy unwrap takes it out again. Done by
+hand, each server's command becomes:
 
   "command": "mcpspy",
   "args": ["run", "--name", "github", "--", "npx", "-y", "@modelcontextprotocol/server-github"]
@@ -115,6 +120,10 @@ async function main(argv: string[]): Promise<void> {
       return mockCommand(rest);
     case 'proxy':
       return proxyCommand(rest);
+    case 'wrap':
+      return wrapCommand(rest, 'wrap');
+    case 'unwrap':
+      return wrapCommand(rest, 'unwrap');
     default:
       fail(`unknown command "${first}". Run mcpspy --help.`);
   }
@@ -791,6 +800,66 @@ async function suiteCommand(argv: string[]): Promise<void> {
     );
   }
   if (counts.fail > 0 || counts.error > 0) process.exitCode = 1;
+}
+
+function wrapCommand(argv: string[], mode: 'wrap' | 'unwrap'): void {
+  const { values, positionals } = parseArgs({
+    args: argv,
+    allowPositionals: true,
+    options: {
+      only: { type: 'string', multiple: true },
+      'dry-run': { type: 'boolean' },
+      ...(mode === 'wrap' ? { command: { type: 'string' }, db: { type: 'string' }, mocks: { type: 'string' } } : {}),
+    },
+  }) as { values: { only?: string[]; 'dry-run'?: boolean; command?: string; db?: string; mocks?: string }; positionals: string[] };
+  if (positionals.length > 1) fail(`${mode} takes one config file`);
+  const path = positionals[0] ?? '.mcp.json';
+  if (!existsSync(path)) fail(`no ${path} here; pass the path to your agent's MCP config`);
+
+  const text = readFileSync(path, 'utf8');
+  let config: unknown;
+  try {
+    config = JSON.parse(text);
+  } catch (error) {
+    fail(`${path} isn't plain JSON, which ${mode} needs (comments and trailing commas aren't supported): ${(error as Error).message}`);
+  }
+  let changed: { config: unknown; changes: WrapChange[] };
+  try {
+    changed =
+      mode === 'wrap'
+        ? wrapConfig(config, { only: values.only, command: values.command, db: values.db, mocks: values.mocks })
+        : unwrapConfig(config, { only: values.only });
+  } catch (error) {
+    fail(`${path}: ${(error as Error).message}`);
+  }
+
+  const style = styleFor(process.stdout);
+  const out = (line: string) => process.stdout.write(`${line}\n`);
+  const done = changed.changes.filter((change) => change.outcome !== 'skipped');
+  for (const change of changed.changes) {
+    out(change.outcome === 'skipped' ? style.dim(`  skipped  ${change.name}: ${change.reason}`) : `  ${style.green(change.outcome)}  ${change.name}`);
+  }
+  if (done.length === 0) {
+    out(`Nothing to ${mode} in ${path}.`);
+    return;
+  }
+  if (values['dry-run']) {
+    out(style.dim(`Dry run: ${path} is unchanged.`));
+    return;
+  }
+
+  // Keep the file's indentation and final newline; write beside it and rename, so
+  // an agent reading the config never sees half of it.
+  const indent = /^[ \t]+/m.exec(text)?.[0] ?? '  ';
+  const temporary = `${path}.mcpspy-${process.pid}`;
+  writeFileSync(temporary, JSON.stringify(changed.config, null, indent) + (text.endsWith('\n') ? '\n' : ''));
+  renameSync(temporary, path);
+  const servers = `${done.length} ${done.length === 1 ? 'server' : 'servers'}`;
+  out(
+    mode === 'wrap'
+      ? `Wrapped ${servers} in ${path}. Restart your agent, then watch with mcpspy ui --open. Undo with mcpspy unwrap.`
+      : `Unwrapped ${servers} in ${path}. Restart your agent to stop recording.`,
+  );
 }
 
 function validate(argv: string[]): void {

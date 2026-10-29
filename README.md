@@ -54,7 +54,20 @@ npm run build
 npm link        # puts `mcpspy` on your PATH
 ```
 
-**A stdio server** (one your agent starts as a process): put `mcpspy run --` in front of its command. In Claude Code's `.mcp.json`:
+**Stdio servers** (ones your agent starts as a process): run `mcpspy wrap` next to your `.mcp.json`, and restart the agent.
+
+```sh
+mcpspy wrap              # puts mcpspy in front of every stdio server in .mcp.json
+mcpspy wrap --dry-run    # shows what it would change, without changing it
+mcpspy unwrap            # puts the config back as it was
+```
+
+It works on any JSON config that lists `mcpServers` or `servers`: pass the path for Cursor (`.cursor/mcp.json`), VS Code (`.vscode/mcp.json`), Claude Desktop (`claude_desktop_config.json`) or Windsurf. Use `--only <name>` to wrap one server. Use `--command <path>` when the agent can't find `mcpspy` on its PATH, which is common for desktop apps. The file is rewritten with its own indentation, so entries written on one line come back spread over several.
+
+<details>
+<summary>What <code>wrap</code> changes, if you'd rather edit by hand</summary>
+
+Each server's command moves behind `mcpspy run --`:
 
 ```json
 {
@@ -66,6 +79,8 @@ npm link        # puts `mcpspy` on your PATH
   }
 }
 ```
+
+</details>
 
 **A server over HTTP** (remote, or local on a port): start a proxy, and give the agent the local URL it prints.
 
@@ -300,6 +315,8 @@ Mocked responses are recorded like real ones, and labelled with the rule that pr
 
 | Command | What it does |
 | --- | --- |
+| `mcpspy wrap [<config>] [--only <name>] [--dry-run] [--command <path>]` | Put mcpspy in front of the stdio servers in an MCP config (`.mcp.json` by default). |
+| `mcpspy unwrap [<config>] [--only <name>] [--dry-run]` | Take it out again, restoring each server's command and args. |
 | `mcpspy run [--name <label>] [--mocks <file>] -- <cmd> [args…]` | Start a stdio server behind the proxy. `mcpspy -- <cmd>` is shorthand. |
 | `mcpspy proxy <url> [--port 7800] [--name <label>] [--mocks <file>]` | Proxy a server reached over HTTP (Streamable HTTP or HTTP+SSE). |
 | `mcpspy ui [--port 7777] [--open] [--read-only]` | Serve the web inspector on localhost. `--read-only` turns replay off. |
