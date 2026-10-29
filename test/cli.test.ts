@@ -3,6 +3,7 @@ import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { Store } from '../src/store.js';
 
 const cli = join(import.meta.dirname, '..', 'src', 'cli.ts');
 const echoServer = join(import.meta.dirname, 'fixtures', 'echo-server.mjs');
@@ -62,5 +63,36 @@ describe('mcpspy wrap and unwrap', () => {
     const bad = await run(['wrap', join(dir, 'bad.json')]);
     expect(bad.code).toBe(2);
     expect(bad.stderr).toContain("bad.json isn't plain JSON");
+  });
+});
+
+describe('mcpspy prune', () => {
+  it('shows what it would delete, then deletes it', async () => {
+    const db = join(mkdtempSync(join(tmpdir(), 'mcpspy-cli-')), 'log.db');
+    const store = new Store(db);
+    for (const [name, daysAgo] of [['ancient', 90], ['recent', 1]] as const) {
+      const started = Date.now() - daysAgo * 24 * 60 * 60 * 1000;
+      const id = store.createSession({ name, transport: 'stdio', command: '[]', cwd: '/', pid: null, started_at: started });
+      store.endSession(id, { ended_at: started + 1000, exit_code: 0, exit_signal: null });
+    }
+    store.close();
+
+    const dryRun = await run(['prune', '--older-than', '30d', '--dry-run', '--db', db]);
+    expect(dryRun.stdout).toContain('Would delete 1 of 2 sessions');
+    expect(dryRun.stdout).toMatch(/#1\s+ancient/);
+    expect(dryRun.stdout).toContain('Dry run: nothing deleted.');
+
+    const pruned = await run(['prune', '--older-than', '30d', '--vacuum', '--db', db]);
+    expect(pruned.code).toBe(0);
+    expect(pruned.stdout).toContain('Deleted 1 of 2 sessions');
+    expect(pruned.stdout).toContain('Vacuumed:');
+    const after = new Store(db);
+    expect(after.listSessions().map((session) => session.name)).toEqual(['recent']);
+    after.close();
+  });
+
+  it('explains what it needs', async () => {
+    expect((await run(['prune'])).stderr).toContain('prune needs --older-than <age>, --keep <n> or --max-size <size>');
+    expect((await run(['prune', '--older-than', '30 days'])).stderr).toContain('use hours, days or weeks');
   });
 });
