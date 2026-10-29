@@ -14,7 +14,7 @@
 </p>
 
 <p align="center">
-    <img src="docs/screenshot.png" alt="The mcpspy web UI: sessions on the left, request and response pairs in the middle, and the selected tool call's request and result on the right." width="900">
+    <img src="docs/screenshot.png" alt="The mcpspy web UI: sessions on the left; request and response pairs in the middle, with mock badges, schema issue counts, errors and token estimates; and on the right an echo call whose GitHub token was recorded as [REDACTED]." width="900">
 </p>
 
 <p align="center">
@@ -32,14 +32,14 @@
 
 ## Why mcpspy?
 
-MCP traffic is invisible. The agent says "the tool failed", or quietly picks the wrong tool, and all you have to go on is the model's summary of what happened. mcpspy shows you the messages themselves.
+MCP traffic is invisible. The agent says "the tool failed", or quietly picks the wrong tool, and all you have to go on is the model's summary of what happened. mcpspy shows you the messages themselves. Once it's installed, `mcpspy wrap` puts it in front of every stdio server in your `.mcp.json`.
 
 - **See what really happened.** Every request, response, notification and stderr line, paired up, timed and searchable, live in a web UI or your terminal. Unlike the official [MCP Inspector](https://github.com/modelcontextprotocol/inspector), which is a client *you* drive, mcpspy records what your *real agent* sends.
 - **Know what it costs.** Every tool definition a server advertises is sent to the model on every turn. mcpspy shows how many tokens each tool and each result adds, and what changed since the server's last session.
 - **Reproduce without re-prompting.** Replay any recorded call against a fresh server, edit its arguments, run it 20 times for a latency spread, or save it in a regression suite that runs in CI.
 - **Catch protocol bugs early.** Arguments and results are checked against the schemas the server itself declared, as they pass through.
 - **Fake what isn't there.** Answer calls from mock rules (outages, rate limits, slow responses, bad payloads) to see how an agent copes, or stand in for a server that doesn't exist yet.
-- **Nothing leaves your machine.** The log is a SQLite file in your home folder. The UI and proxy only listen on localhost, environment variable values are never stored, and HTTP headers such as `Authorization` are never recorded.
+- **Nothing leaves your machine, and secrets stay out of the log.** The log is a SQLite file in your home folder. The UI and proxy only listen on localhost. Tokens and passwords in the traffic are replaced with `[REDACTED]` before they're stored. Environment variable values and HTTP headers such as `Authorization` are never recorded.
 
 ## Quick start
 
@@ -425,7 +425,8 @@ With `--mocks`, the proxy has to read a request before deciding whether the serv
 flowchart LR
     B["bytes"] --> F["LineSplitter<br/>one frame per \n line"]
     F --> C["classifyFrame<br/>request · notification ·<br/>response · error · invalid<br/>(batches expanded)"]
-    C --> P["pair responses<br/>with requests"]
+    C --> R["redact secrets"]
+    R --> P["pair responses<br/>with requests"]
     P --> T["estimate tokens<br/>for results"]
     T --> V["validate against<br/>declared schemas"]
     V --> D[("messages row")]
@@ -442,7 +443,7 @@ if (message.kind === 'response' || message.kind === 'error') {
 }
 ```
 
-Validation works the same way, one session at a time: the session's latest `tools/list` response is compiled into JSON Schema validators (with [Ajv](https://ajv.js.org)), and each later call and result is checked against them as it passes.
+Validation works the same way, one session at a time: the session's latest tool list (joined across pages, when the server sends it in pages) is compiled into JSON Schema validators (with [Ajv](https://ajv.js.org)), and each later call and result is checked against them as it passes.
 
 ### The HTTP proxy
 
@@ -515,8 +516,8 @@ Everything lives in one SQLite file, `~/.mcpspy/mcpspy.db` (or `--db` / `$MCPSPY
 
 | Table | One row per |
 | --- | --- |
-| `sessions` | server session: name, transport (`stdio`, `http`, `sse`, `mock`, `replay`), command or URL, working directory, start and end, exit code, and the session it replays |
-| `messages` | message: direction, kind, method, JSON-RPC id, the raw payload, the request it answers, latency, tokens, schema issues, and the mock rule that answered it |
+| `sessions` | server session: name, transport (`stdio`, `http`, `sse`, `mock`, `replay`), command or URL, working directory, start and end, exit code, the session it replays, and its message count (kept up to date by a trigger) |
+| `messages` | message: direction, kind, method, JSON-RPC id, the payload (secrets redacted), the request it answers, latency, tokens, schema issues, and the mock rule that answered it |
 | `exact_counts` | cached `count_tokens` result per message and model |
 
 It's yours to query. For example, the slowest tools across every session:
