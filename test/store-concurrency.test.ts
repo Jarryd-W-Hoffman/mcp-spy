@@ -76,4 +76,17 @@ describe('opening a log from several processes', () => {
     expect(store.listSessions(20)).toHaveLength(8);
     store.close();
   });
+
+  it('counts the messages already in an old log when it adds message counts', async () => {
+    const path = oldLog();
+    const db = new DatabaseSync(path);
+    db.exec(`INSERT INTO sessions (id, transport, command, cwd, started_at) VALUES (1, 'stdio', '[]', '/', 0), (2, 'stdio', '[]', '/', 0)`);
+    const insert = db.prepare(`INSERT INTO messages (session_id, ts, direction, kind, payload, size) VALUES (?, 0, 'client', 'notification', '{}', 2)`);
+    for (const sessionId of [1, 1, 2]) insert.run(sessionId);
+    db.close();
+
+    const store = new Store(path);
+    expect(store.listSessions().map((session) => [session.id, session.message_count])).toEqual([[2, 1], [1, 2]]);
+    store.close();
+  });
 });

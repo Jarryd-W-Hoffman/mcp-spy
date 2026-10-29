@@ -21,7 +21,8 @@ CREATE TABLE IF NOT EXISTS sessions (
   exit_signal TEXT,
   replay_of INTEGER,
   env_keys TEXT,
-  checked INTEGER NOT NULL DEFAULT 0
+  checked INTEGER NOT NULL DEFAULT 0,
+  message_count INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS messages (
@@ -65,7 +66,26 @@ const MIGRATIONS: [table: string, column: string, definition: string][] = [
   ['messages', 'issues', 'TEXT'],
   ['sessions', 'checked', 'INTEGER NOT NULL DEFAULT 0'],
   ['messages', 'mock', 'TEXT'],
+  ['sessions', 'message_count', 'INTEGER NOT NULL DEFAULT 0'],
 ];
+
+/**
+ * Created after migrations, since they use columns that older logs gain there.
+ * The triggers keep sessions.message_count current for every writer, including
+ * older mcpspy versions sharing the log; the partial indexes hold only the rows
+ * that validate and the UI's startup backfill look for.
+ */
+const DERIVED = `
+CREATE TRIGGER IF NOT EXISTS messages_count_insert AFTER INSERT ON messages BEGIN
+  UPDATE sessions SET message_count = message_count + 1 WHERE id = NEW.session_id;
+END;
+CREATE TRIGGER IF NOT EXISTS messages_count_delete AFTER DELETE ON messages BEGIN
+  UPDATE sessions SET message_count = message_count - 1 WHERE id = OLD.session_id;
+END;
+CREATE INDEX IF NOT EXISTS messages_issues ON messages(id) WHERE issues IS NOT NULL;
+CREATE INDEX IF NOT EXISTS messages_missing_tokens ON messages(id)
+  WHERE tokens IS NULL AND kind IN ('response', 'error') AND method IN ('tools/list', 'tools/call', 'resources/read', 'prompts/get');
+`;
 
 const SQLITE_BUSY = 5;
 
@@ -127,8 +147,13 @@ export class Store {
     const columns = (table: string) =>
       new Set((this.db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[]).map((column) => column.name));
     for (const [table, column, definition] of MIGRATIONS) {
-      if (!columns(table).has(column)) this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+      if (columns(table).has(column)) continue;
+      this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+      if (column === 'message_count') {
+        this.db.exec('UPDATE sessions SET message_count = (SELECT COUNT(*) FROM messages m WHERE m.session_id = sessions.id)');
+      }
     }
+    this.db.exec(DERIVED);
   }
 
   createSession(
@@ -162,13 +187,11 @@ export class Store {
     return this.db.prepare('SELECT * FROM sessions WHERE id = ?').get(id) as SessionRow | undefined;
   }
 
-  listSessions(limit = 20): (SessionRow & { message_count: number })[] {
+  /** The newest sessions, or with `beforeId` the newest of those older than it. */
+  listSessions(limit = 20, beforeId?: number): (SessionRow & { message_count: number })[] {
     return this.db
-      .prepare(
-        `SELECT s.*, (SELECT COUNT(*) FROM messages m WHERE m.session_id = s.id) AS message_count
-         FROM sessions s ORDER BY s.id DESC LIMIT ?`,
-      )
-      .all(limit) as unknown as (SessionRow & { message_count: number })[];
+      .prepare('SELECT * FROM sessions WHERE id < ? ORDER BY id DESC LIMIT ?')
+      .all(beforeId ?? Number.MAX_SAFE_INTEGER, limit) as unknown as (SessionRow & { message_count: number })[];
   }
 
   getMessage(id: number): MessageRow | undefined {
@@ -249,29 +272,32 @@ export class Store {
       pages.unshift(reply);
       if (!requestsLaterPage(request_payload)) break;
     }
-    const first = pages[0];
-    if (!first) return undefined;
+    return joinToolListPages(pages);
+  }
 
-    const tools: unknown[] = [];
-    const costs: unknown[] = [];
-    for (const page of pages) {
-      try {
-        const listed = (JSON.parse(page.payload) as { result?: { tools?: unknown } }).result?.tools;
-        if (Array.isArray(listed)) tools.push(...listed);
-      } catch {
-        // A malformed page was flagged when recorded; list what the others hold.
-      }
-      if (page.token_detail) costs.push(...(JSON.parse(page.token_detail) as unknown[]));
+  /**
+   * The tool listing whose first page is the tools/list response `responseId`,
+   * with the pages that followed it joined in. Undefined when that response is
+   * a later page itself, or not a tools/list response.
+   */
+  toolListFrom(responseId: number): ToolListing | undefined {
+    const first = this.getMessage(responseId);
+    if (!first || first.method !== 'tools/list' || first.kind !== 'response') return undefined;
+    const pages: MessageRow[] = [];
+    const replies = this.db
+      .prepare(
+        `SELECT r.*, q.payload AS request_payload FROM messages r
+         LEFT JOIN messages q ON q.id = r.request_id
+         WHERE r.session_id = ? AND r.id >= ? AND r.method = 'tools/list' AND r.kind = 'response'
+         ORDER BY r.id`,
+      )
+      .iterate(first.session_id, first.id) as Iterable<MessageRow & { request_payload: string | null }>;
+    for (const { request_payload, ...reply } of replies) {
+      const laterPage = requestsLaterPage(request_payload);
+      if (pages.length === 0 ? laterPage : !laterPage) break;
+      pages.push(reply);
     }
-    const rpcId = first.rpc_id === null ? null : (JSON.parse(first.rpc_id) as unknown);
-    return {
-      messageId: first.id,
-      requestId: first.request_id,
-      pages: pages.length,
-      payload: JSON.stringify({ jsonrpc: '2.0', id: rpcId, result: { tools } }),
-      tokens: pages.reduce((sum, page) => sum + (page.tokens ?? 0), 0),
-      tokenDetail: costs.length > 0 ? JSON.stringify(costs) : null,
-    };
+    return joinToolListPages(pages);
   }
 
   /** All replies to tools/call in a session, oldest first, joined to their request. */
@@ -358,4 +384,31 @@ export interface ToolListing {
   payload: string;
   tokens: number;
   tokenDetail: string | null;
+}
+
+/** One tools/list response holding the tools of every page, in order. */
+function joinToolListPages(pages: MessageRow[]): ToolListing | undefined {
+  const first = pages[0];
+  if (!first) return undefined;
+
+  const tools: unknown[] = [];
+  const costs: unknown[] = [];
+  for (const page of pages) {
+    try {
+      const listed = (JSON.parse(page.payload) as { result?: { tools?: unknown } }).result?.tools;
+      if (Array.isArray(listed)) tools.push(...listed);
+    } catch {
+      // A malformed page was flagged when recorded; list what the others hold.
+    }
+    if (page.token_detail) costs.push(...(JSON.parse(page.token_detail) as unknown[]));
+  }
+  const rpcId = first.rpc_id === null ? null : (JSON.parse(first.rpc_id) as unknown);
+  return {
+    messageId: first.id,
+    requestId: first.request_id,
+    pages: pages.length,
+    payload: JSON.stringify({ jsonrpc: '2.0', id: rpcId, result: { tools } }),
+    tokens: pages.reduce((sum, page) => sum + (page.tokens ?? 0), 0),
+    tokenDetail: costs.length > 0 ? JSON.stringify(costs) : null,
+  };
 }

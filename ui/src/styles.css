@@ -566,6 +566,11 @@ td {
   padding: 0;
 }
 
+.sessions-more {
+  margin: 8px 8px 4px;
+  font-size: 12px;
+}
+
 .raw {
   margin: 0;
   padding: 10px 12px;

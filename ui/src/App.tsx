@@ -16,7 +16,7 @@ export function App() {
     errorsOnly: false,
     issuesOnly: false,
   });
-  const { messages, sessions, connection } = useLiveData(filter.sessionId);
+  const { messages, sessions, connection, moreSessions, loadOlderSessions } = useLiveData(filter.sessionId);
   const [selected, setSelected] = useState<number | null>(null);
   const [compareBase, setCompareBase] = useState<number | null>(null);
   const [view, setView] = useState<'traffic' | 'tools'>('traffic');
@@ -107,7 +107,13 @@ export function App() {
         </span>
       </header>
 
-      <SessionList sessions={sessions} selected={filter.sessionId} onSelect={(sessionId) => update({ sessionId })} />
+      <SessionList
+          sessions={sessions}
+          selected={filter.sessionId}
+          onSelect={(sessionId) => update({ sessionId })}
+          more={moreSessions}
+          onShowOlder={loadOlderSessions}
+        />
 
       <main className="main">
         <div className="tabs" role="tablist">
