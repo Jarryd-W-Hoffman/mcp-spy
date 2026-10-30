@@ -153,6 +153,12 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
     const local = `${target.pathname}${target.search}`;
     const method = req.method!;
     const body = method === 'GET' || method === 'HEAD' || method === 'DELETE' ? Buffer.alloc(0) : await readAll(req);
+    // Only POST bodies are checked, so with a policy, a body on any other method (PUT, PATCH, …) never reaches the server.
+    if (policy && method !== 'POST' && body.length > 0) {
+      warn(`policy: refused a ${method} request with a body`);
+      res.writeHead(405, { 'content-type': 'text/plain', allow: 'GET, POST, DELETE' }).end(`mcpspy's policy only checks POST bodies, so it refuses a ${method} with one`);
+      return;
+    }
     const text = body.toString('utf8');
     const parsed = parseJson(text);
     const sessionHeader = header(req.headers, 'mcp-session-id');

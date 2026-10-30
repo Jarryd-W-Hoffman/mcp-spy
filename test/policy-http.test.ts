@@ -119,6 +119,23 @@ describe('HTTP proxy with a policy', () => {
     expect(warnings).toContain('policy denied tools/call write_file (rules[0]): read only');
   });
 
+  it('refuses bodies sent with methods other than POST, which it would not check', async () => {
+    await start({ rules: [{ tool: 'search', allow: true }] });
+    for (const method of ['PUT', 'PATCH']) {
+      const response = await fetch(proxy.url, { method, headers: { 'content-type': 'application/json', 'mcp-session-id': 'S' }, body: JSON.stringify(call(1, 'write_file')) });
+      expect([response.status, await response.text()]).toEqual([405, `mcpspy's policy only checks POST bodies, so it refuses a ${method} with one`]);
+    }
+    expect(up.received).toEqual([]);
+    expect(warnings).toEqual(['policy: refused a PUT request with a body', 'policy: refused a PATCH request with a body']);
+  });
+
+  it('forwards other methods as before when there is no policy', async () => {
+    proxy = await startHttpProxy({ upstream: up.url, store, name: 'remote', port: 0, warn: () => {} });
+    const response = await fetch(proxy.url, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(call(1, 'write_file')) });
+    expect(response.status).toBe(200);
+    expect(up.received).toHaveLength(1);
+  });
+
   it('refuses batches, bodies that are not JSON and refused notifications', async () => {
     await start({ default: 'allow', rules: [{ method: 'notifications/secret', deny: 'hush' }] });
     const batch = await post([call(1, 'search'), { jsonrpc: '2.0', method: 'notifications/initialized' }]);
