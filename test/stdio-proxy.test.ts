@@ -55,7 +55,7 @@ describe('runStdioProxy when the log fails', () => {
 describe('runStdioProxy redaction', () => {
   it('forwards secrets untouched but records them redacted, command line included', async () => {
     const store = new Store(':memory:');
-    const proxy = harness(store, ['--api-key=ghp_0123456789abcdefghijABCDEFGHIJ012345']);
+    const proxy = harness(store, ['--api-key=ghp_0123456789abcdefghijABCDEFGHIJ012345', '--token', 'plainsecret']);
     proxy.send({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'slow', arguments: { ms: 1, text: 'password=hunter2 sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123' } } });
     await proxy.waitForLines(1);
     proxy.input.end();
@@ -63,7 +63,7 @@ describe('runStdioProxy redaction', () => {
 
     expect(proxy.stdout()).toContain('sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123');
     const recorded = JSON.stringify([store.getSession(sessionId), store.messagesAfter(0, { sessionId })]);
-    expect(recorded).not.toMatch(/ghp_0123|sk-ant-api03/);
+    expect(recorded).not.toMatch(/ghp_0123|sk-ant-api03|plainsecret/);
     expect(recorded).toContain('[REDACTED]');
     store.close();
   });

@@ -438,9 +438,9 @@ Policies work the same over HTTP: `mcpspy proxy <url> --policy policy.json` answ
 
 mcpspy removes secrets from what it records, before anything reaches the log. The agent and server still exchange the real values, because only the record changes.
 
-- **Known formats**, wherever they appear: GitHub, Anthropic, OpenAI, AWS, Slack, Stripe and Google keys, JWTs, `Bearer …` and `Basic …` credentials, private key blocks, `user:password@` in URLs, and secrets in query strings (`?api_key=…`).
+- **Known formats**, wherever they appear: GitHub, GitLab, Anthropic, OpenAI, AWS, Slack, Stripe, Google, npm and Hugging Face keys, JWTs, `Bearer …` and `Basic …` credentials, private key blocks, `user:password@` in URLs, secrets in query strings (`?api_key=…`), and assignments to secret names (`--api-key=…`, `GITHUB_TOKEN=…`) with values of 8 characters or more.
 - **Secret keys** in JSON: the values of `password`, `secret`, `token`, `access_token`, `api_key`, `authorization`, `cookie`, `private_key` and similar keys. Keys only match whole, so `progressToken` and `max_tokens` are kept.
-- **Command lines** and HTTP URLs of servers, and stderr lines.
+- **Command lines** and HTTP URLs of servers, and stderr lines. On a command line, the argument after a secret flag (`--token <value>`, `--api-key <value>`) goes too.
 
 ```sh
 mcpspy run --redact 'acct-\d+' -- my-server     # also remove your own patterns
