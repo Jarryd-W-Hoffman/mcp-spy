@@ -78,7 +78,7 @@ describe('pruning the log', () => {
     expect(store.messagesAfter(0, { sessionId: doomed })).toEqual([]);
     expect(store.exactCount(response!.id, 'm')).toBeUndefined();
     expect(store.listSessions().map((s) => [s.id, s.message_count])).toEqual([[kept, 6]]);
-  });
+  }, 30_000); // 2,500 recorded calls: under a second here, but over five on a busy CI runner
 
   it('shrinks the file when vacuumed', async () => {
     session('bulk', 50, { calls: 300, size: 2000 });
