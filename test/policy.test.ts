@@ -1,5 +1,5 @@
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { describe, expect, it } from 'vitest';
@@ -214,6 +214,16 @@ describe('paths', () => {
     expect(allowed(join(root, 'project', 'srcfoo'))).toBe(false);
     expect(allowed('file://elsewhere/etc/passwd')).toBe(false);
     expect(allowed(5)).toBe(false);
+  });
+
+  it('reads a leading ~ as the home directory, as servers do, and refuses ~user', () => {
+    // A server that expands ~ would read the home directory, not a "~" folder inside the root.
+    expect(isUnder('~/.ssh/id_rsa', ['/work'], '/work')).toBe(false);
+    expect(isUnder('~', ['/work'], '/work')).toBe(false);
+    expect(isUnder('~/notes.md', [homedir()], '/work')).toBe(true);
+    expect(isUnder('~', [homedir()], '/work')).toBe(true);
+    expect(isUnder('~root/x', ['/'], '/')).toBe(false);
+    expect(isUnder('./~/x', ['/work'], '/work')).toBe(true);
   });
 
   it('accepts a single directory', () => {
