@@ -172,7 +172,7 @@ async function run(argv: string[]): Promise<void> {
   const [command, ...args] = argv.slice(separator + 1) as [string, ...string[]];
 
   // Before anything starts: a server must never run without the policy it was given.
-  const policy = values.policy !== undefined ? loadPolicy(values.policy, values.name ?? null) : undefined;
+  const policy = values.policy !== undefined ? loadPolicy(values.policy, values.name ?? null, process.cwd()) : undefined;
   const mocks = values.mocks !== undefined ? loadMocks(values.mocks, values.name ?? null) : undefined;
   const redactor = makeRedactor(values);
   let store: Store;
@@ -212,7 +212,8 @@ async function proxyCommand(argv: string[]): Promise<void> {
   if (!isLoopbackHost(values.host)) fail('--host must be a loopback address; recorded traffic can contain secrets');
 
   // Before listening: the agent must never reach the server without the policy it was given.
-  const policy = values.policy !== undefined ? loadPolicy(values.policy, values.name ?? null) : undefined;
+  // A remote server's working directory is unknown, so relative paths can't be checked.
+  const policy = values.policy !== undefined ? loadPolicy(values.policy, values.name ?? null, null) : undefined;
   const mocks = values.mocks !== undefined ? loadMocks(values.mocks, values.name ?? null) : undefined;
   const headers = parseHeaders(values.header);
   const redactor = makeRedactor(values);
@@ -254,9 +255,10 @@ function makeRedactor(values: { redact?: string[]; 'no-redact'?: boolean }): Red
   }
 }
 
-function loadPolicy(path: string, serverName: string | null): PolicyEngine {
+/** `cwd` is the server's working directory, or null when it isn't known (over HTTP). */
+function loadPolicy(path: string, serverName: string | null, cwd: string | null): PolicyEngine {
   try {
-    return new PolicyEngine(resolve(path), serverName, process.cwd(), (message) => process.stderr.write(`[mcpspy] ${message}\n`));
+    return new PolicyEngine(resolve(path), serverName, cwd, (message) => process.stderr.write(`[mcpspy] ${message}\n`));
   } catch (error) {
     fail(`policy ${(error as Error).message}`);
   }
@@ -1090,7 +1092,7 @@ function wrapCommand(argv: string[], mode: 'wrap' | 'unwrap'): void {
 
   // Checked now, not when the agent next starts a server and gets nothing.
   const policy = values.policy !== undefined ? resolve(values.policy) : undefined;
-  if (policy !== undefined) loadPolicy(policy, null);
+  if (policy !== undefined) loadPolicy(policy, null, process.cwd()); // only to validate it
 
   const text = readFileSync(path, 'utf8');
   let config: unknown;
