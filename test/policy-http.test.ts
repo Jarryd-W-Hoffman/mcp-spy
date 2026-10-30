@@ -136,6 +136,18 @@ describe('HTTP proxy with a policy', () => {
     ]);
   });
 
+  it('passes tool errors and full tool lists through unchanged', async () => {
+    await start({ default: 'allow', results: { maxBytes: 1000 } });
+    expect((await post({ jsonrpc: '2.0', id: 1, method: 'tools/list' })).reply).toMatchObject({ result: { tools } });
+    expect((await post(call(2, 'fail'))).reply).toMatchObject({ error: { message: 'boom' } });
+    expect(store.messagesAfter(0).filter((message) => message.mock !== null)).toEqual([]);
+  });
+
+  it('refuses ask rules, which need mcpspy run', async () => {
+    await start({ rules: [{ tool: 'search', ask: 'Search?' }] });
+    expect(text((await post(call(1, 'search'))).reply)).toBe('Blocked by mcpspy policy: needs approval (Search?), but asking only works with mcpspy run');
+  });
+
   it('redacts every message from the server, batches and stream events included', async () => {
     await up.close();
     const server = createServer((req, res) => {
@@ -172,18 +184,6 @@ describe('HTTP proxy with a policy', () => {
     expect(stream).not.toContain('sk-live');
     // What's recorded is what the agent got.
     expect(store.messagesAfter(0).filter((message) => message.payload.includes('sk-live'))).toEqual([]);
-  });
-
-  it('passes tool errors and full tool lists through unchanged', async () => {
-    await start({ default: 'allow', results: { maxBytes: 1000 } });
-    expect((await post({ jsonrpc: '2.0', id: 1, method: 'tools/list' })).reply).toMatchObject({ result: { tools } });
-    expect((await post(call(2, 'fail'))).reply).toMatchObject({ error: { message: 'boom' } });
-    expect(store.messagesAfter(0).filter((message) => message.mock !== null)).toEqual([]);
-  });
-
-  it('refuses ask rules, which need mcpspy run', async () => {
-    await start({ rules: [{ tool: 'search', ask: 'Search?' }] });
-    expect(text((await post(call(1, 'search'))).reply)).toBe('Blocked by mcpspy policy: needs approval (Search?), but asking only works with mcpspy run');
   });
 
   it('answers refusals without a session header when the agent sent none', async () => {
