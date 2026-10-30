@@ -258,6 +258,25 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
       const type = header(up.headers, 'content-type') ?? '';
       const encoding = header(up.headers, 'content-encoding');
       const encoded = encoding !== null && encoding !== 'identity';
+      if (encoded && !DECODERS.has(encoding)) {
+        if (policy) {
+          // Replies the policy can't read can't be checked: hidden tools or unredacted results could get through.
+          up.resume();
+          warn(`policy: refused a reply compressed with ${encoding}, which mcpspy can't read`);
+          res.writeHead(502, { 'content-type': 'text/plain' }).end(`mcpspy's policy can't check a reply compressed with ${encoding}`);
+          return;
+        }
+        res.writeHead(up.statusCode!, responseHeaders);
+        up.pipe(res);
+        return;
+      }
+      // We asked for identity; a server that compressed anyway is decoded here, so what's
+      // checked and recorded is exactly what the agent gets. A corrupt body resets the reply.
+      const source: NodeJS.ReadableStream = encoded ? decompress(up, encoding, () => res.destroy()) : up;
+      if (encoded) {
+        delete responseHeaders['content-encoding'];
+        delete responseHeaders['content-length'];
+      }
 
       if (type.startsWith('text/event-stream')) {
         if (!tracked && method === 'GET' && up.statusCode === 200) {
@@ -270,18 +289,11 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
         res.flushHeaders();
         const session = tracked;
         if (session) hold(session, res);
-        if (encoded) {
-          // We asked for identity; if the server compressed anyway, forward as-is and read a decompressed copy.
-          up.pipe(res);
-          const parser = new SseParser((event) => session && onServerEvent(session, event, target));
-          decompress(up, encoding).on('data', (chunk: Buffer) => parser.push(chunk));
-          return;
-        }
         const parser = new SseParser((event) => {
           res.write(session ? (onServerEvent(session, event, target, req.headers.host) ?? event.raw) : event.raw);
         });
-        up.on('data', (chunk: Buffer) => parser.push(chunk));
-        up.on('end', () => {
+        source.on('data', (chunk: Buffer) => parser.push(chunk));
+        source.on('end', () => {
           res.end(parser.rest());
           if (session && method === 'GET' && sessionHeader === null) end(session); // the legacy stream is the session
         });
@@ -294,17 +306,17 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
 
       // JSON and anything else: buffer (MCP responses are single messages), record, then forward.
       const chunks: Buffer[] = [];
-      up.on('data', (chunk: Buffer) => chunks.push(chunk));
+      source.on('data', (chunk: Buffer) => chunks.push(chunk));
       up.on('error', () => res.destroy());
-      up.on('end', () => {
+      source.on('end', () => {
         let raw = Buffer.concat(chunks);
         // Responses always carry a status line.
         const status = up.statusCode!;
         const session = tracked;
-        const decoded = encoded ? null : raw.toString('utf8');
-        const reply = decoded !== null && type.includes('json') ? parseJson(decoded) : undefined;
+        const decoded = raw.toString('utf8');
+        const reply = type.includes('json') ? parseJson(decoded) : undefined;
 
-        if (session && decoded !== null && reply !== undefined && isJsonRpc(reply)) {
+        if (session && reply !== undefined && isJsonRpc(reply)) {
           const shaped = shapeReply(session, reply);
           if (shaped !== null) {
             raw = Buffer.from(shaped.text);
@@ -312,7 +324,7 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
           }
           record(() => session.recorder.frame('server', shaped?.text ?? decoded, shaped?.rule ?? mockedBy));
         } else if (session && status >= 400) {
-          const detail = decoded !== null ? decoded.trim().slice(0, 500) : `${raw.length} bytes, ${encoding}`;
+          const detail = decoded.trim().slice(0, 500);
           record(() => session.recorder.stderr(`[http] ${status} ${up.statusMessage} for ${method} ${local}${detail ? `: ${detail}` : ''}`));
         }
         res.writeHead(status, responseHeaders).end(raw);
@@ -460,9 +472,17 @@ function readAll(stream: IncomingMessage): Promise<Buffer> {
   });
 }
 
-function decompress(stream: IncomingMessage, encoding: string): NodeJS.ReadableStream {
-  const decoder = encoding === 'br' ? createBrotliDecompress() : encoding === 'deflate' ? createInflate() : createGunzip();
-  decoder.on('error', () => {});
+/** The content encodings mcpspy can decode. */
+const DECODERS = new Map([
+  ['gzip', createGunzip],
+  ['x-gzip', createGunzip],
+  ['deflate', createInflate],
+  ['br', createBrotliDecompress],
+]);
+
+function decompress(stream: IncomingMessage, encoding: string, onError: () => void): NodeJS.ReadableStream {
+  const decoder = DECODERS.get(encoding)!();
+  decoder.on('error', onError);
   return stream.pipe(decoder);
 }
 

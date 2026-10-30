@@ -416,6 +416,7 @@ It allows what the session did, not what it should do, so review it before you r
 - **Broken policy:** mcpspy refuses to start the server, and `wrap` refuses to write the config.
 - **Broken edit:** while running, the policy reloads when you save it. A broken edit keeps the old rules in force.
 - **What the server sees:** the request exactly as it was checked, re-serialised. JSON with duplicate keys therefore can't show the policy one tool name and the server another.
+- **Compressed replies:** behind `mcpspy proxy`, a reply the server compressed is decompressed and checked like any other. One in an encoding mcpspy can't read is refused (`502`).
 - **Batches and invalid lines:** batched requests, and lines from the agent that aren't JSON, are refused.
 - **Other HTTP methods:** behind `mcpspy proxy`, only `POST` bodies are checked, so a `PUT`, `PATCH` or any other request with a body is refused (`405`) and never reaches the server.
 
@@ -618,7 +619,7 @@ A session ends when the agent sends `DELETE`, when its legacy event stream close
 
 The legacy HTTP+SSE transport works differently. The client opens an event stream with a GET, and the server's first event names the URL to POST messages to. When that URL is absolute, the proxy rewrites it to point at itself, or the agent's messages would go straight past it.
 
-To make that possible, SSE responses are forwarded **one event at a time** rather than byte by byte. Each event is held until its terminating blank line, recorded, rewritten if it has to be, then sent. An event isn't usable by the client until that blank line anyway, so this adds no delay. JSON responses are buffered and forwarded whole. The proxy asks the server for uncompressed bodies so it can read them; if a server compresses anyway, the bytes pass through untouched and a decompressed copy is recorded.
+To make that possible, SSE responses are forwarded **one event at a time** rather than byte by byte. Each event is held until its terminating blank line, recorded, rewritten if it has to be, then sent. An event isn't usable by the client until that blank line anyway, so this adds no delay. JSON responses are buffered and forwarded whole. The proxy asks the server for uncompressed bodies so it can read them. If a server compresses anyway (gzip, deflate or brotli), the proxy decompresses the reply and forwards it plain, so what's recorded and checked is exactly what the agent gets. A reply in an encoding mcpspy can't read passes through untouched, unless a policy is set: then it's refused, since it can't be checked.
 
 ### The live UI
 

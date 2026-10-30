@@ -1,5 +1,6 @@
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
+import { gzipSync } from 'node:zlib';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { MockEngine } from '../src/mocks.js';
 import { parsePolicy, PolicyEngine, type PolicyFile } from '../src/policy.js';
@@ -151,6 +152,38 @@ describe('HTTP proxy with a policy', () => {
       'policy: refused a request body that is not JSON',
       'policy denied notifications/secret (rules[0]): hush',
     ]);
+  });
+
+  it('holds compressed replies to the policy too, and refuses ones it cannot read', async () => {
+    await up.close();
+    const listing = JSON.stringify({ jsonrpc: '2.0', id: 1, result: { tools } });
+    const secret = JSON.stringify({ jsonrpc: '2.0', id: 2, result: { content: [{ type: 'text', text: 'key sk-live-123' }] } });
+    const server = createServer((req, res) => {
+      let body = '';
+      req.on('data', (chunk) => (body += chunk));
+      req.on('end', () => {
+        const id = (JSON.parse(body) as { id: number }).id;
+        if (id === 3) return res.writeHead(200, { 'content-type': 'application/json', 'content-encoding': 'zstd' }).end('opaque');
+        const reply = id === 1 ? listing : secret;
+        if (req.headers['x-sse']) {
+          res.writeHead(200, { 'content-type': 'text/event-stream', 'content-encoding': 'gzip' });
+          return res.end(gzipSync(`event: message\ndata: ${reply}\n\n`));
+        }
+        res.writeHead(200, { 'content-type': 'application/json', 'content-encoding': 'gzip' }).end(gzipSync(reply));
+      });
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    up = { url: `http://127.0.0.1:${(server.address() as AddressInfo).port}/mcp`, received: [], close: () => new Promise<void>((resolve) => server.close(() => resolve())) };
+    await start({ rules: [{ tool: 'read_file', allow: true }, { tool: 'search', allow: true }], results: { redact: ['sk-live-\\w+'] } });
+
+    for (const sse of [false, true]) {
+      const list = await post({ jsonrpc: '2.0', id: 1, method: 'tools/list' }, sse);
+      expect(((list.reply as Reply).result!.tools as { name: string }[]).map((tool) => tool.name)).toEqual(['read_file', 'search']);
+      expect(text((await post(call(2, 'search'), sse)).reply)).toBe('key [redacted by policy]');
+    }
+    const unreadable = await fetch(proxy.url, { method: 'POST', headers: { 'content-type': 'application/json', 'mcp-session-id': 'S' }, body: JSON.stringify(call(3, 'search')) });
+    expect([unreadable.status, await unreadable.text()]).toEqual([502, "mcpspy's policy can't check a reply compressed with zstd"]);
+    expect(warnings).toContain("policy: refused a reply compressed with zstd, which mcpspy can't read");
   });
 
   it('passes tool errors and full tool lists through unchanged', async () => {
