@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { createReadStream, existsSync, readFileSync, realpathSync, renameSync, writeFileSync } from 'node:fs';
+import { createReadStream, existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
 import { parseArgs } from 'node:util';
@@ -17,7 +17,7 @@ import {
   type Style,
 } from './format.js';
 import { MockEngine, parseMockFile, rulesFromRecording, type MockFile, type MockTool } from './mocks.js';
-import { isUnder, PolicyEngine } from './policy.js';
+import { isInside, PolicyEngine } from './policy.js';
 import { suggestPolicy, type RecordedCall } from './policy-suggest.js';
 import { startHttpProxy, type HttpProxy } from './proxy/http.js';
 import { applyPrune, parseAge, parseRetention, parseSize, planPrune, type PruneRules } from './prune.js';
@@ -173,9 +173,9 @@ async function run(argv: string[]): Promise<void> {
 
   // Before anything starts: a server must never run without the policy it was given.
   const policy = values.policy !== undefined ? loadPolicy(values.policy, values.name ?? null) : undefined;
-  if (values.policy !== undefined) warnIfWritable(resolve(values.policy), process.cwd(), "the server's working directory");
   const mocks = values.mocks !== undefined ? loadMocks(values.mocks, values.name ?? null) : undefined;
   const redactor = makeRedactor(values);
+  if (values.policy !== undefined) warnIfWritable(resolve(values.policy), process.cwd(), "the server's working directory");
   let store: Store;
   try {
     store = new Store(values.db);
@@ -269,7 +269,7 @@ function loadPolicy(path: string, serverName: string | null): PolicyEngine {
  * reloads when it changes, so it wouldn't be held by it.
  */
 function warnIfWritable(policy: string, directory: string, where: string): void {
-  if (!isUnder(policy, [realpathSync(directory)], directory)) return;
+  if (!isInside(policy, directory)) return;
   process.stderr.write(
     `mcpspy: warning: the policy ${policy} is inside ${where}. ` +
       "An agent that can write files there could change its own policy: make sure no tool the policy allows can write it, or keep it elsewhere (with absolute \"under\" paths).\n",
@@ -1104,12 +1104,10 @@ function wrapCommand(argv: string[], mode: 'wrap' | 'unwrap'): void {
 
   // Checked now, not when the agent next starts a server and gets nothing.
   const policy = values.policy !== undefined ? resolve(values.policy) : undefined;
-  if (policy !== undefined) {
-    loadPolicy(policy, null);
-    warnIfWritable(policy, dirname(resolve(path)), "the config's directory, where its servers usually run");
-  }
+  if (policy !== undefined) loadPolicy(policy, null);
 
   const text = readFileSync(path, 'utf8');
+  if (policy !== undefined) warnIfWritable(policy, dirname(resolve(path)), "the config's directory, where its servers usually run");
   let config: unknown;
   try {
     config = JSON.parse(text);
