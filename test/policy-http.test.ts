@@ -119,6 +119,24 @@ describe('HTTP proxy with a policy', () => {
     expect(warnings).toContain('policy denied tools/call write_file (rules[0]): read only');
   });
 
+  it('refuses batches, bodies that are not JSON and refused notifications', async () => {
+    await start({ default: 'allow', rules: [{ method: 'notifications/secret', deny: 'hush' }] });
+    const batch = await post([call(1, 'search'), { jsonrpc: '2.0', method: 'notifications/initialized' }]);
+    expect((batch.reply as Reply[]).map((reply) => [reply.id, reply.error!.code])).toEqual([[1, POLICY_ERROR]]);
+    expect(await post([{ jsonrpc: '2.0', method: 'notifications/initialized' }])).toMatchObject({ status: 202, reply: null });
+    expect(await post('not json')).toMatchObject({ status: 202, reply: null });
+    expect(await post({ jsonrpc: '2.0', method: 'notifications/secret' })).toMatchObject({ status: 202, reply: null });
+    expect(await post({ jsonrpc: '2.0', method: 'notifications/initialized' })).toMatchObject({ status: 202 });
+    expect(await post({ jsonrpc: '2.0', id: 9, result: {} })).toMatchObject({ status: 202 });
+    expect(up.received).toEqual(['{"jsonrpc":"2.0","method":"notifications/initialized"}', '{"jsonrpc":"2.0","id":9,"result":{}}']);
+    expect(warnings).toEqual([
+      'policy: refused a batch of messages',
+      'policy: refused a batch of messages',
+      'policy: refused a request body that is not JSON',
+      'policy denied notifications/secret (rules[0]): hush',
+    ]);
+  });
+
   it('holds compressed replies to the policy too, and refuses ones it cannot read', async () => {
     await up.close();
     const listing = JSON.stringify({ jsonrpc: '2.0', id: 1, result: { tools } });
@@ -149,24 +167,6 @@ describe('HTTP proxy with a policy', () => {
     const unreadable = await fetch(proxy.url, { method: 'POST', headers: { 'content-type': 'application/json', 'mcp-session-id': 'S' }, body: JSON.stringify(call(3, 'search')) });
     expect([unreadable.status, await unreadable.text()]).toEqual([502, "mcpspy's policy can't check a reply compressed with zstd"]);
     expect(warnings).toContain("policy: refused a reply compressed with zstd, which mcpspy can't read");
-  });
-
-  it('refuses batches, bodies that are not JSON and refused notifications', async () => {
-    await start({ default: 'allow', rules: [{ method: 'notifications/secret', deny: 'hush' }] });
-    const batch = await post([call(1, 'search'), { jsonrpc: '2.0', method: 'notifications/initialized' }]);
-    expect((batch.reply as Reply[]).map((reply) => [reply.id, reply.error!.code])).toEqual([[1, POLICY_ERROR]]);
-    expect(await post([{ jsonrpc: '2.0', method: 'notifications/initialized' }])).toMatchObject({ status: 202, reply: null });
-    expect(await post('not json')).toMatchObject({ status: 202, reply: null });
-    expect(await post({ jsonrpc: '2.0', method: 'notifications/secret' })).toMatchObject({ status: 202, reply: null });
-    expect(await post({ jsonrpc: '2.0', method: 'notifications/initialized' })).toMatchObject({ status: 202 });
-    expect(await post({ jsonrpc: '2.0', id: 9, result: {} })).toMatchObject({ status: 202 });
-    expect(up.received).toEqual(['{"jsonrpc":"2.0","method":"notifications/initialized"}', '{"jsonrpc":"2.0","id":9,"result":{}}']);
-    expect(warnings).toEqual([
-      'policy: refused a batch of messages',
-      'policy: refused a batch of messages',
-      'policy: refused a request body that is not JSON',
-      'policy denied notifications/secret (rules[0]): hush',
-    ]);
   });
 
   it('passes tool errors and full tool lists through unchanged', async () => {

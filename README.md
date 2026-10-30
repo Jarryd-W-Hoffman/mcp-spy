@@ -413,8 +413,8 @@ It allows what the session did, not what it should do, so review it before you r
 - **Broken policy:** mcpspy refuses to start the server, and `wrap` refuses to write the config.
 - **Broken edit:** while running, the policy reloads when you save it. A broken edit keeps the old rules in force.
 - **What the server sees:** the request exactly as it was checked, re-serialised. JSON with duplicate keys therefore can't show the policy one tool name and the server another.
-- **Batches and invalid lines:** batched requests, and lines from the agent that aren't JSON, are refused.
 - **Compressed replies:** behind `mcpspy proxy`, a reply the server compressed is decompressed and checked like any other. One in an encoding mcpspy can't read is refused (`502`).
+- **Batches and invalid lines:** batched requests, and lines from the agent that aren't JSON, are refused.
 
 <p align="center">
     <img src="docs/policy.png" alt="A read_file call for project/../.ssh/id_ed25519 refused by the default deny rule: the detail pane gives the reason the agent saw, and policy badges mark every call the policy answered or changed." width="900">
