@@ -79,6 +79,11 @@ export async function startUiServer(options: UiServerOptions): Promise<UiServer>
   }, pollInterval);
 
   const server = createServer((req, res) => {
+    // No other site may frame the UI: a hidden frame could trick a click on Replay (clickjacking),
+    // and clicks inside it are same-origin, so replay's own checks would pass.
+    res.setHeader('x-frame-options', 'DENY');
+    res.setHeader('content-security-policy', "frame-ancestors 'none'");
+    res.setHeader('x-content-type-options', 'nosniff');
     try {
       handle(req, res);
     } catch (error) {

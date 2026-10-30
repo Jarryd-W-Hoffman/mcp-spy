@@ -92,6 +92,18 @@ describe('UI server', () => {
     expect(asset.headers.get('cache-control')).toContain('immutable');
   });
 
+  it('forbids other sites from framing it, on every response', async () => {
+    for (const path of ['/', '/api/sessions', '/api/nope']) {
+      const response = await fetch(ui.url + path);
+      await response.arrayBuffer();
+      expect([response.headers.get('x-frame-options'), response.headers.get('content-security-policy'), response.headers.get('x-content-type-options')]).toEqual([
+        'DENY',
+        "frame-ancestors 'none'",
+        'nosniff',
+      ]);
+    }
+  });
+
   it('refuses requests addressed to a non-loopback host', async () => {
     const { port } = new URL(ui.url);
     const status = await new Promise<number>((resolve, reject) => {
