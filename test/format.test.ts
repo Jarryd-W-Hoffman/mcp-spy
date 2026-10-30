@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { errorSummary, formatBytes, formatDuration, formatMessageLine, plain, requestSubject } from '../src/format.js';
+import { errorSummary, formatBytes, formatDuration, formatMessageLine, matchSnippet, plain, requestSubject, type Style } from '../src/format.js';
 import type { MessageRow } from '../src/store.js';
 
 function row(overrides: Partial<MessageRow>): MessageRow {
@@ -48,6 +48,20 @@ describe('format helpers', () => {
       'tool error: boom',
     );
     expect(errorSummary(row({ payload: '{"result":{}}' }))).toBeNull();
+  });
+});
+
+describe('matchSnippet', () => {
+  const marked: Style = { ...plain, yellow: (text) => `[${text}]`, dim: (text) => text };
+
+  it('shows the match with some context, on one line', () => {
+    expect(matchSnippet('{"a":\n  "Hello World"}', 'world', marked, 5)).toBe('…ello [World]"}');
+    expect(matchSnippet('{"path":"/etc/passwd","more":"x"}', 'etc', marked, 4)).toBe('…":"/[etc]/pas…');
+    expect(matchSnippet('{"text":"say \\"hi\\""}', 'say "hi"', marked)).toBe('{"text":"[say \\"hi\\"]"}');
+  });
+
+  it('falls back to the start of the payload when the match is not found', () => {
+    expect(matchSnippet('x'.repeat(30), 'nope', marked, 5)).toBe('xxxxxxxxx…');
   });
 });
 
