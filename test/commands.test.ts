@@ -791,7 +791,8 @@ describe('mcpspy prune', () => {
   it('only vacuums with --vacuum alone, and reports free space', async () => {
     const db = tmpDb();
     withStore(db, (store) => {
-      for (let i = 0; i < 200; i++) old(store, `s${i}`, 10);
+      // Each deleted session pauses 20 ms for other writers; 40 free enough pages without taking seconds.
+      for (let i = 0; i < 40; i++) old(store, `s${i}`, 10);
     });
     await cli(['prune', '--older-than', '1d', '--db', db]);
     const result = await cli(['prune', '--vacuum', '--db', db]);
