@@ -148,8 +148,15 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
       return;
     }
 
-    // Node sets url and method on every request a server receives.
+    // Node sets url and method on every request a server receives. Only paths on the
+    // upstream are proxied: an absolute-form target (`GET http://elsewhere/`), or a path
+    // like //elsewhere or /\\elsewhere, would otherwise send the request, with any -H
+    // token, to another server.
     const target = new URL(req.url!, upstream);
+    if (!req.url!.startsWith('/') || target.origin !== upstream.origin) {
+      res.writeHead(400, { 'content-type': 'text/plain' }).end(`mcpspy only proxies paths on ${upstream.origin}`);
+      return;
+    }
     const local = `${target.pathname}${target.search}`;
     const method = req.method!;
     const body = method === 'GET' || method === 'HEAD' || method === 'DELETE' ? Buffer.alloc(0) : await readAll(req);
@@ -258,6 +265,25 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
       const type = header(up.headers, 'content-type') ?? '';
       const encoding = header(up.headers, 'content-encoding');
       const encoded = encoding !== null && encoding !== 'identity';
+      if (encoded && !DECODERS.has(encoding)) {
+        if (policy) {
+          // Replies the policy can't read can't be checked: hidden tools or unredacted results could get through.
+          up.resume();
+          warn(`policy: refused a reply compressed with ${encoding}, which mcpspy can't read`);
+          res.writeHead(502, { 'content-type': 'text/plain' }).end(`mcpspy's policy can't check a reply compressed with ${encoding}`);
+          return;
+        }
+        res.writeHead(up.statusCode!, responseHeaders);
+        up.pipe(res);
+        return;
+      }
+      // We asked for identity; a server that compressed anyway is decoded here, so what's
+      // checked and recorded is exactly what the agent gets. A corrupt body resets the reply.
+      const source: NodeJS.ReadableStream = encoded ? decompress(up, encoding, () => res.destroy()) : up;
+      if (encoded) {
+        delete responseHeaders['content-encoding'];
+        delete responseHeaders['content-length'];
+      }
 
       if (type.startsWith('text/event-stream')) {
         if (!tracked && method === 'GET' && up.statusCode === 200) {
@@ -270,18 +296,11 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
         res.flushHeaders();
         const session = tracked;
         if (session) hold(session, res);
-        if (encoded) {
-          // We asked for identity; if the server compressed anyway, forward as-is and read a decompressed copy.
-          up.pipe(res);
-          const parser = new SseParser((event) => session && onServerEvent(session, event, target));
-          decompress(up, encoding).on('data', (chunk: Buffer) => parser.push(chunk));
-          return;
-        }
         const parser = new SseParser((event) => {
           res.write(session ? (onServerEvent(session, event, target, req.headers.host) ?? event.raw) : event.raw);
         });
-        up.on('data', (chunk: Buffer) => parser.push(chunk));
-        up.on('end', () => {
+        source.on('data', (chunk: Buffer) => parser.push(chunk));
+        source.on('end', () => {
           res.end(parser.rest());
           if (session && method === 'GET' && sessionHeader === null) end(session); // the legacy stream is the session
         });
@@ -294,17 +313,17 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
 
       // JSON and anything else: buffer (MCP responses are single messages), record, then forward.
       const chunks: Buffer[] = [];
-      up.on('data', (chunk: Buffer) => chunks.push(chunk));
+      source.on('data', (chunk: Buffer) => chunks.push(chunk));
       up.on('error', () => res.destroy());
-      up.on('end', () => {
+      source.on('end', () => {
         let raw = Buffer.concat(chunks);
         // Responses always carry a status line.
         const status = up.statusCode!;
         const session = tracked;
-        const decoded = encoded ? null : raw.toString('utf8');
-        const reply = decoded !== null && type.includes('json') ? parseJson(decoded) : undefined;
+        const decoded = raw.toString('utf8');
+        const reply = type.includes('json') ? parseJson(decoded) : undefined;
 
-        if (session && decoded !== null && reply !== undefined && isJsonRpc(reply)) {
+        if (session && reply !== undefined && isJsonRpc(reply)) {
           const shaped = shapeReply(session, reply);
           if (shaped !== null) {
             raw = Buffer.from(shaped.text);
@@ -312,7 +331,7 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
           }
           record(() => session.recorder.frame('server', shaped?.text ?? decoded, shaped?.rule ?? mockedBy));
         } else if (session && status >= 400) {
-          const detail = decoded !== null ? decoded.trim().slice(0, 500) : `${raw.length} bytes, ${encoding}`;
+          const detail = decoded.trim().slice(0, 500);
           record(() => session.recorder.stderr(`[http] ${status} ${up.statusMessage} for ${method} ${local}${detail ? `: ${detail}` : ''}`));
         }
         res.writeHead(status, responseHeaders).end(raw);
@@ -373,21 +392,34 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
   }
 
   /**
-   * A reply as the agent should get it: tool lists with mock tools added and
-   * forbidden ones removed, tool results held to the policy's limits. Null
-   * when nothing changes.
+   * A message from the server as the agent should get it: tool lists with mock
+   * tools added and forbidden ones removed, tool results held to the policy's
+   * limits, anything else redacted. A batch is shaped item by item. Null when
+   * nothing changes.
    */
   function shapeReply(session: Tracked, message: unknown): { text: string; rule: string } | null {
-    if (typeof message !== 'object' || message === null || Array.isArray(message)) return null;
-    const { id, result } = message as { id?: unknown; result?: unknown };
-    const key = JSON.stringify(id);
-    const kind = id === undefined ? undefined : awaitingOf(session).get(key);
-    if (kind === undefined) return null;
-    awaitingOf(session).delete(key);
-    if (result === undefined) return null;
+    const items = Array.isArray(message) ? message : [message];
+    const shaped = items.map((item) => shapeOne(session, item));
+    if (shaped.every((item) => item === null)) return null;
+    const out = shaped.map((item, index) => (item === null ? items[index] : item.message));
+    return { text: JSON.stringify(Array.isArray(message) ? out : out[0]), rule: shaped.find((item) => item !== null)!.rule };
+  }
 
-    let shaped: unknown = result;
-    let rule: string | null = null;
+  function shapeOne(session: Tracked, message: unknown): { message: unknown; rule: string } | null {
+    if (typeof message !== 'object' || message === null || Array.isArray(message)) return null;
+    const record = message as Record<string, unknown>;
+    const redacted = policy?.redactMessage(record) ?? null;
+    const plain = redacted ? { message: redacted, rule: 'policy: redacted' } : null;
+    const { id, result } = record;
+    const key = JSON.stringify(id);
+    const kind = id === undefined || 'method' in record ? undefined : awaitingOf(session).get(key);
+    if (kind === undefined) return plain;
+    awaitingOf(session).delete(key);
+    if (result === undefined) return plain;
+
+    // Tool results get the policy's limits below, which include redaction; lists are redacted first, as on stdio.
+    let shaped: unknown = kind === 'list' && redacted ? redacted.result : result;
+    let rule: string | null = kind === 'list' && redacted ? 'policy: redacted' : null;
     if (kind === 'list' && mocks && mocks.tools.length > 0) {
       shaped = mocks.patchToolList(shaped);
       rule = 'mock tools';
@@ -400,7 +432,7 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
       const limited = policy.limitResult(shaped);
       if (limited.change) [shaped, rule] = [limited.result, `policy: ${limited.change}`];
     }
-    return rule === null ? null : { text: JSON.stringify({ ...message, result: shaped }), rule };
+    return rule === null ? null : { message: { ...record, result: shaped }, rule };
   }
 
   await new Promise<void>((resolve, reject) => {
@@ -460,9 +492,17 @@ function readAll(stream: IncomingMessage): Promise<Buffer> {
   });
 }
 
-function decompress(stream: IncomingMessage, encoding: string): NodeJS.ReadableStream {
-  const decoder = encoding === 'br' ? createBrotliDecompress() : encoding === 'deflate' ? createInflate() : createGunzip();
-  decoder.on('error', () => {});
+/** The content encodings mcpspy can decode. */
+const DECODERS = new Map([
+  ['gzip', createGunzip],
+  ['x-gzip', createGunzip],
+  ['deflate', createInflate],
+  ['br', createBrotliDecompress],
+]);
+
+function decompress(stream: IncomingMessage, encoding: string, onError: () => void): NodeJS.ReadableStream {
+  const decoder = DECODERS.get(encoding)!();
+  decoder.on('error', onError);
   return stream.pipe(decoder);
 }
 

@@ -57,7 +57,7 @@ export function runStdioProxy(options: StdioProxyOptions): Promise<StdioProxyRes
   const session = {
     name: options.name ?? null,
     transport: 'stdio',
-    command: JSON.stringify([command, ...args].map((part) => redactor.text(part))),
+    command: JSON.stringify(redactor.args([command, ...args])),
     cwd,
     pid: null,
     started_at: Date.now(),

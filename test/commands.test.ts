@@ -1,8 +1,8 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, utimesSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { PassThrough } from 'node:stream';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { start } from '../src/cli.js';
@@ -259,17 +259,24 @@ describe('mcpspy proxy', () => {
 
   it('holds an HTTP server to a policy, and refuses to listen with a broken one', async () => {
     const fixture = await startHttpFixture();
-    const policy = join(dir(), 'policy.json');
-    writeFileSync(policy, '{"default": "deny"}');
+    const folder = dir();
+    const policy = join(folder, 'policy.json');
+    // A root holding mcpspy's own working directory, where a relative path would land if it were resolved locally.
+    writeFileSync(policy, JSON.stringify({ default: 'deny', rules: [{ tool: 'echo', where: { text: { under: process.cwd() } }, allow: true }] }));
     try {
       const result = await cli(['proxy', fixture.url, '--port', '0', '--policy', policy, '--db', tmpDb()]);
       const url = /Point your agent at (\S+)/.exec(result.stderr)![1]!;
-      const response = await fetch(url, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream' },
-        body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'echo', arguments: { text: 'hi' } } }),
-      });
-      expect(await response.text()).toContain('Blocked by mcpspy policy: no rule allows echo');
+      const echo = async (text: string) =>
+        (
+          await fetch(url, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream' },
+            body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'echo', arguments: { text } } }),
+          })
+        ).text();
+      // The remote server's working directory isn't known, so a relative path can't be judged.
+      expect(await echo('notes.md')).toContain('Blocked by mcpspy policy: \\"text\\" is not allowed for echo');
+      expect(await echo(join(process.cwd(), 'notes.md'))).not.toContain('Blocked');
       const exited = new Promise<number>((resolve) => vi.spyOn(process, 'exit').mockImplementation(((code: number) => resolve(code)) as never));
       result.signals.get('SIGINT')!();
       expect(await exited).toBe(0);
@@ -992,6 +999,28 @@ describe('mcpspy wrap and unwrap', () => {
     return path;
   };
 
+  it('warns when the policy sits where the servers it governs could write it', async () => {
+    const project = dir();
+    const path = join(project, 'mcp.json');
+    writeFileSync(path, '{"mcpServers":{"a":{"command":"node","args":["a.js"]}}}');
+    writeFileSync(join(project, 'policy.json'), '{"default": "allow"}');
+    const inside = await cli(['wrap', path, '--policy', join(project, 'policy.json'), '--dry-run']);
+    expect(inside.code).toBe(0);
+    expect(inside.stderr).toContain(`mcpspy: warning: the policy ${join(realpathSync(project), 'policy.json')} is inside the config's directory`);
+    const elsewhere = join(dir(), 'policy.json');
+    writeFileSync(elsewhere, '{"default": "allow"}');
+    expect((await cli(['wrap', path, '--policy', elsewhere, '--dry-run'])).stderr).not.toContain('warning');
+
+    const cwd = process.cwd();
+    process.chdir(project);
+    try {
+      const run = await cli(['run', '--db', tmpDb(), '--policy', 'policy.json', '--', process.execPath, echoServer], { stdin: '' });
+      expect(run.stderr).toContain("is inside the server's working directory. An agent that can write files there could change its own policy: make sure no tool");
+    } finally {
+      process.chdir(cwd);
+    }
+  });
+
   it('keeps compact files compact', async () => {
     const path = config('{"mcpServers":{"a":{"command":"node","args":["a.js"]},"b":{"url":"http://x"}}}');
     const result = await cli(['wrap', path, '--command', '/bin/mcpspy', '--db', 'x.db', '--mocks', 'm.json']);
@@ -1003,6 +1032,22 @@ describe('mcpspy wrap and unwrap', () => {
     expect(text.endsWith('}')).toBe(true);
     const unwrapped = await cli(['unwrap', path, '--only', 'a']);
     expect(unwrapped.stdout).toContain('Unwrapped 1 server in');
+  });
+
+  it("keeps a config's permissions, and a symlinked config a link", async () => {
+    for (const mode of [0o600, 0o644]) {
+      const path = config('{"mcpServers":{"a":{"command":"node","args":["a.js"]}}}');
+      chmodSync(path, mode);
+      expect((await cli(['wrap', path])).code).toBe(0);
+      expect(statSync(path).mode & 0o777).toBe(mode);
+    }
+    const real = config('{"mcpServers":{"a":{"command":"node","args":["a.js"]}}}');
+    const link = join(dir(), 'linked.json');
+    symlinkSync(real, link);
+    expect((await cli(['wrap', link])).code).toBe(0);
+    expect(lstatSync(link).isSymbolicLink()).toBe(true);
+    expect(readFileSync(real, 'utf8')).toContain('"run"');
+    expect(readdirSync(dirname(real))).toEqual(['mcp.json']);
   });
 
   it('adds a checked policy, by absolute path', async () => {

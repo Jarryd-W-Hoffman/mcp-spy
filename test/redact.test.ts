@@ -14,6 +14,10 @@ describe('Redactor', () => {
     ['an OpenAI key', 'sk-proj-abcdefghijklmnopqrstuvwxyz0123'],
     ['an AWS access key', 'AKIAIOSFODNN7EXAMPLE'],
     ['a Slack token', 'xoxb-1234567890-abcdefghij'],
+    ['a Slack app token', 'xapp-1-A0B1C2D3E4-1234567890-abcdef0123456789'],
+    ['a GitLab token', 'glpat-abcdefghij1234567890'],
+    ['an npm token', 'npm_abcdefghijklmnopqrstuvwxyz0123456789'],
+    ['a Hugging Face token', 'hf_abcdefghijklmnopqrstuvwxyz0123456789'],
     ['a Stripe key', 'sk_live_abcdefghijklmnop1234'],
     ['a Google API key', 'AIzaSyA-0123456789abcdefghijklmnopqrstu'],
     ['a JWT', 'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U'],
@@ -27,10 +31,20 @@ describe('Redactor', () => {
     expect(redactor.text('postgres://app:hunter2@db.internal/app')).toBe(`postgres://app:${REDACTED}@db.internal/app`);
     expect(redactor.text('https://x.dev/mcp?team=core&api_key=abc123&page=2')).toBe(`https://x.dev/mcp?team=core&api_key=${REDACTED}&page=2`);
     expect(redactor.text('-----BEGIN RSA PRIVATE KEY-----\nMIIE\n-----END RSA PRIVATE KEY-----')).toBe(REDACTED);
+    expect(redactor.text('--api-key=abcd1234efgh5678')).toBe(`--api-key=${REDACTED}`);
+    expect(redactor.text('export GITHUB_TOKEN=abcdefgh123 DB_PASSWORD=hunter22hunter')).toBe(`export GITHUB_TOKEN=${REDACTED} DB_PASSWORD=${REDACTED}`);
+  });
+
+  it('redacts the value after a secret flag on a command line', () => {
+    expect(redactor.args(['server', '--token', 'abc', '-api-key', 'x', '--port', '80', '--secret', '', '--password'])).toEqual([
+      'server', '--token', REDACTED, '-api-key', REDACTED, '--port', '80', '--secret', '', '--password',
+    ]);
+    expect(redactor.args(['--token', 'ghp_0123456789abcdefghijABCDEFGHIJ012345'])).toEqual(['--token', REDACTED]);
+    expect(new Redactor({ builtIn: false }).args(['--token', 'abc'])).toEqual(['--token', 'abc']);
   });
 
   it('leaves ordinary text alone', () => {
-    const prose = 'Basic authentication and Bearer instruments; a task-runner; progressToken 5; https://example.com/a?page=2';
+    const prose = 'Basic authentication and Bearer instruments; a task-runner; progressToken 5; progressToken=5; max_tokens=4096; https://example.com/a?page=2';
     expect(redactor.text(prose)).toBe(prose);
   });
 

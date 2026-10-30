@@ -63,7 +63,7 @@ mcpspy wrap --dry-run    # shows what it would change, without changing it
 mcpspy unwrap            # puts the config back as it was
 ```
 
-It works on any JSON config that lists `mcpServers` or `servers`: pass the path for Cursor (`.cursor/mcp.json`), VS Code (`.vscode/mcp.json`), Claude Desktop (`claude_desktop_config.json`) or Windsurf. Use `--only <name>` to wrap one server. Use `--command <path>` when the agent can't find `mcpspy` on its PATH, which is common for desktop apps. The file is rewritten with its own indentation, so entries written on one line come back spread over several.
+It works on any JSON config that lists `mcpServers` or `servers`: pass the path for Cursor (`.cursor/mcp.json`), VS Code (`.vscode/mcp.json`), Claude Desktop (`claude_desktop_config.json`) or Windsurf. Use `--only <name>` to wrap one server. Use `--command <path>` when the agent can't find `mcpspy` on its PATH, which is common for desktop apps. The file is rewritten with its own indentation, so entries written on one line come back spread over several. It keeps its permissions, and a symlinked config (say, one kept in a dotfiles repo) stays a link, with the file it points to updated.
 
 <details>
 <summary>What <code>wrap</code> changes, if you'd rather edit by hand</summary>
@@ -146,7 +146,7 @@ Headers such as `Authorization` are forwarded but never recorded. Replays and su
 mcpspy proxy https://api.githubcopilot.com/mcp/ --name github -H "Authorization: Bearer $GITHUB_TOKEN"
 ```
 
-The startup message names the headers the proxy adds, but never their values, and they're never recorded.
+The startup message names the headers the proxy adds, but never their values. They're never recorded, and only ever sent to that server: a request aimed anywhere else (`GET http://elsewhere/`, or a path like `//elsewhere`) is refused.
 
 ### 🪙 Context cost
 
@@ -379,7 +379,7 @@ flowchart LR
 
 - **Rules** are checked in order, and the first one that matches decides. A rule matches on `tool` (with `*` wildcards), or `method` for anything other than `tools/call`, and on `server` (the `--name`, with wildcards). It may also have a `where` of tests on the arguments (or a request's params), keyed by dot path. It then `allow`s (`true`), `deny`s with a reason the agent sees, or `ask`s with a prompt. When an allow rule's tests fail, the refusal names the argument (`"path" is not allowed for read_file`).
 - **Tests**:
-  - `under` (directories, relative to the policy file): the path must be inside one of them once symlinks are followed, so `src/../../etc` and a link out of `src/` both fail. A relative path in the arguments is resolved against the server's working directory. A leading `~` means the home directory, as servers that expand it read it, and `~user` paths are refused.
+  - `under` (directories, relative to the policy file): the path must be inside one of them once symlinks are followed, so `src/../../etc` and a link out of `src/` both fail. A relative path in the arguments is resolved against the server's working directory. A leading `~` means the home directory, as servers that expand it read it, and `~user` paths are refused. Behind `mcpspy proxy`, the server's working directory and home aren't known, so only absolute paths and `file:` URIs can pass an `under` test.
   - `in`: one of a list of values.
   - `match` and `notMatch`: regular expressions.
   - `max`: for numbers.
@@ -390,7 +390,7 @@ flowchart LR
 - **Asking**: an `ask` rule holds the call and asks the agent's user, through MCP elicitation, whether to let it through. The call goes ahead only if the user accepts. It's refused if they decline, if nobody answers within two minutes, or if the agent closes its connection first. If the agent cancels the call while it's held, the call is dropped and never runs, even if the user accepts afterwards. When an ask ends unanswered, the agent is told, so it can close its prompt. It's also refused if the agent didn't declare elicitation support, or if the server is behind `mcpspy proxy`: the HTTP proxy has no way to ask.
 - **Rates**: `rate` on an allow rule (`"10/minute"`, per `second`, `minute`, `hour` or `day`) refuses calls beyond the limit, over a sliding window.
 - **Tool lists** lose the tools no call could be allowed to use, so the agent doesn't plan around them. A tool that some arguments could unlock stays listed.
-- **Results**: `maxBytes` replaces an oversized tool result with an error, and `redact` replaces matches in what the agent receives. This is unlike [Secrets](#-secrets), which only changes the record.
+- **Results**: `maxBytes` replaces an oversized tool result with an error. `redact` replaces matches in everything the server sends the agent: tool results and lists, resource contents, prompts, errors, log notifications and the server's own requests (such as `sampling/createMessage`), batches included. The JSON-RPC envelope (`jsonrpc`, `id`, `method`) is never changed, so a broad pattern can't break the protocol. This is unlike [Secrets](#-secrets), which only changes the record.
 
 A refused tool call gets a tool result with `isError: true` and the reason, so the agent can adjust. Other refused requests get a JSON-RPC error (code `-32001`). Each decision goes to stderr (`[mcpspy] policy denied tools/call write_file (no writes): writes need a human`), and its reply is recorded with the rule that decided it, or `default deny` when no rule matched. In the UI, those rows carry a **policy** badge.
 
@@ -414,8 +414,11 @@ It allows what the session did, not what it should do, so review it before you r
 
 **It fails closed:**
 - **Broken policy:** mcpspy refuses to start the server, and `wrap` refuses to write the config.
+- **Rules that could never match** are broken too. A policy checks what the agent sends, so a rule naming a request only servers send (`sampling/createMessage`, `elicitation/create`, `roots/list`, or a server notification) is refused rather than silently ignored.
 - **Broken edit:** while running, the policy reloads when you save it. A broken edit keeps the old rules in force.
+- **Keep it out of the agent's reach.** The policy reloads when its file changes, so an agent that can write the file can change its own rules. If it sits where the servers work (beside `.mcp.json`, say), make sure no tool it allows can write it, as `write_*` is denied above. Otherwise keep it elsewhere, with absolute `under` paths. mcpspy warns when the file is inside the server's working directory or the config's directory.
 - **What the server sees:** the request exactly as it was checked, re-serialised. JSON with duplicate keys therefore can't show the policy one tool name and the server another.
+- **Compressed replies:** behind `mcpspy proxy`, a reply the server compressed is decompressed and checked like any other. One in an encoding mcpspy can't read is refused (`502`).
 - **Batches and invalid lines:** batched requests, and lines from the agent that aren't JSON, are refused.
 - **Other HTTP methods:** behind `mcpspy proxy`, only `POST` bodies are checked, so a `PUT`, `PATCH` or any other request with a body is refused (`405`) and never reaches the server.
 
@@ -429,15 +432,15 @@ The tools/list reply above lost `write_file` and `delete_branch`, which no rule 
     <img src="docs/policy-tools.png" alt="A tools/list response with write_file and delete_branch hidden by the policy." width="900">
 </p>
 
-Policies work the same over HTTP: `mcpspy proxy <url> --policy policy.json` answers refusals itself, and filters and limits replies whether the server answers in JSON or over SSE. A relative path in a remote server's arguments is resolved against the directory `mcpspy proxy` runs in, since the server's own directory is unknown.
+Policies work the same over HTTP: `mcpspy proxy <url> --policy policy.json` answers refusals itself, and filters and limits replies whether the server answers in JSON or over SSE. A remote server's working directory and home aren't known, so an `under` test there only accepts absolute paths and `file:` URIs.
 
 ### 🔒 Secrets
 
 mcpspy removes secrets from what it records, before anything reaches the log. The agent and server still exchange the real values, because only the record changes.
 
-- **Known formats**, wherever they appear: GitHub, Anthropic, OpenAI, AWS, Slack, Stripe and Google keys, JWTs, `Bearer …` and `Basic …` credentials, private key blocks, `user:password@` in URLs, and secrets in query strings (`?api_key=…`).
+- **Known formats**, wherever they appear: GitHub, GitLab, Anthropic, OpenAI, AWS, Slack, Stripe, Google, npm and Hugging Face keys, JWTs, `Bearer …` and `Basic …` credentials, private key blocks, `user:password@` in URLs, secrets in query strings (`?api_key=…`), and assignments to secret names (`--api-key=…`, `GITHUB_TOKEN=…`) with values of 8 characters or more.
 - **Secret keys** in JSON: the values of `password`, `secret`, `token`, `access_token`, `api_key`, `authorization`, `cookie`, `private_key` and similar keys. Keys only match whole, so `progressToken` and `max_tokens` are kept.
-- **Command lines** and HTTP URLs of servers, and stderr lines.
+- **Command lines** and HTTP URLs of servers, and stderr lines. On a command line, the argument after a secret flag (`--token <value>`, `--api-key <value>`) goes too.
 
 ```sh
 mcpspy run --redact 'acct-\d+' -- my-server     # also remove your own patterns
@@ -618,7 +621,7 @@ A session ends when the agent sends `DELETE`, when its legacy event stream close
 
 The legacy HTTP+SSE transport works differently. The client opens an event stream with a GET, and the server's first event names the URL to POST messages to. When that URL is absolute, the proxy rewrites it to point at itself, or the agent's messages would go straight past it.
 
-To make that possible, SSE responses are forwarded **one event at a time** rather than byte by byte. Each event is held until its terminating blank line, recorded, rewritten if it has to be, then sent. An event isn't usable by the client until that blank line anyway, so this adds no delay. JSON responses are buffered and forwarded whole. The proxy asks the server for uncompressed bodies so it can read them; if a server compresses anyway, the bytes pass through untouched and a decompressed copy is recorded.
+To make that possible, SSE responses are forwarded **one event at a time** rather than byte by byte. Each event is held until its terminating blank line, recorded, rewritten if it has to be, then sent. An event isn't usable by the client until that blank line anyway, so this adds no delay. JSON responses are buffered and forwarded whole. The proxy asks the server for uncompressed bodies so it can read them. If a server compresses anyway (gzip, deflate or brotli), the proxy decompresses the reply and forwards it plain, so what's recorded and checked is exactly what the agent gets. A reply in an encoding mcpspy can't read passes through untouched, unless a policy is set: then it's refused, since it can't be checked.
 
 ### The live UI
 
@@ -640,7 +643,7 @@ Images are costed by their pixel dimensions (read from the PNG, GIF, JPEG or Web
 Recorded traffic often holds secrets: tokens in tool arguments, private documents in results. So:
 
 - **Only localhost.** The UI and the HTTP proxy bind to `127.0.0.1` and refuse requests whose `Host` isn't a loopback name, which stops DNS-rebinding attacks from a web page. The proxy also refuses a non-local `Origin`.
-- **Replay can't be triggered cross-site.** Replay starts processes, so its endpoint also requires a custom header and a JSON body. A cross-site request can't send those without a CORS preflight, and mcpspy never approves one. It also checks `Origin` and `Sec-Fetch-Site`. `mcpspy ui --read-only` turns replay off entirely.
+- **Replay can't be triggered cross-site.** Replay starts processes, so its endpoint also requires a custom header and a JSON body. A cross-site request can't send those without a CORS preflight, and mcpspy never approves one. It also checks `Origin` and `Sec-Fetch-Site`. No other site may frame the UI (`X-Frame-Options: DENY`, `frame-ancestors 'none'`), so a hidden frame can't trick you into clicking Replay. `mcpspy ui --read-only` turns replay off entirely.
 - **Secrets are removed before they're stored.** Well-known credential formats and the values of secret-sounding keys are replaced with `[REDACTED]` in everything recorded. See [Secrets](#-secrets).
 - **Names, not values.** For stdio servers, mcpspy stores the names of environment variables (so replay can say which are missing), never their values. Over HTTP, headers are never stored at all.
 - **A key per run.** Loopback is shared by every user on the machine, so `mcpspy ui` makes a random key each time it starts and prints a link carrying it. Opening the link swaps the key for an `HttpOnly`, `SameSite=Strict` cookie and drops it from the address bar. Without the cookie, every request gets `401`, so another user can't read your log through the UI or replay calls as you.
@@ -649,7 +652,9 @@ Recorded traffic often holds secrets: tokens in tool arguments, private document
 
 ## Your log on disk
 
-Everything lives in one SQLite file, `~/.mcpspy/mcpspy.db` (or `--db` / `$MCPSPY_DB`):
+Everything lives in one SQLite file, `~/.mcpspy/mcpspy.db` (or `--db` / `$MCPSPY_DB`). It holds tool arguments, results and server output, so only you can read it: the file (and its `-wal` and `-shm` companions) is `0600` and `~/.mcpspy` is `0700`, tightened each time mcpspy opens the log.
+
+Its tables:
 
 | Table | One row per |
 | --- | --- |

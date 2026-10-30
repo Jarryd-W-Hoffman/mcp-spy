@@ -64,6 +64,33 @@ describe('HTTP proxy edge cases', () => {
     }
   });
 
+  it('only proxies paths on the upstream, so an -H token never goes elsewhere', async () => {
+    const elsewhere = await upstream((req, res) => res.end(`elsewhere saw ${req.headers.authorization}`));
+    try {
+      await start((req, res) => res.end(`upstream ${req.url}`), { headers: { Authorization: 'Bearer secret' } });
+      const { port } = new URL(proxy!.url);
+      const raw = (path: string) =>
+        new Promise<[number, string]>((resolve, reject) => {
+          request({ host: '127.0.0.1', port, path, headers: { host: `127.0.0.1:${port}` } }, (res) => {
+            let body = '';
+            res.on('data', (chunk: Buffer) => (body += chunk.toString()));
+            res.on('end', () => resolve([res.statusCode!, body]));
+          })
+            .on('error', reject)
+            .end();
+        });
+      const refused = [400, `mcpspy only proxies paths on http://127.0.0.1:${up!.port}`];
+      for (const path of [`http://127.0.0.1:${elsewhere.port}/steal`, `//127.0.0.1:${elsewhere.port}/steal`, `/\\127.0.0.1:${elsewhere.port}/steal`]) {
+        expect(await raw(path)).toEqual(refused);
+      }
+      // An absolute target naming the upstream itself is still a request off a path, so it's refused too.
+      expect(await raw(`http://127.0.0.1:${up!.port}/mcp`)).toEqual(refused);
+      expect(await raw('/mcp?x=1')).toEqual([200, 'upstream /mcp?x=1']);
+    } finally {
+      await elsewhere.close();
+    }
+  });
+
   it('reaches https upstreams, reporting TLS failures', async () => {
     up = await upstream((_req, res) => res.end('plain'));
     proxy = await startHttpProxy({ upstream: up.url.replace('http:', 'https:'), store, port: 0, warn: (message) => warnings.push(message) });
@@ -84,7 +111,7 @@ describe('HTTP proxy edge cases', () => {
     expect((await post(rpc(1, 'ping'), { origin: 'not a url' })).status).toBe(403);
   });
 
-  it('forwards compressed and identity replies, describing compressed errors', async () => {
+  it('decodes compressed replies, so they are recorded and the agent gets them plain', async () => {
     const bodies: Record<string, [string, Buffer]> = {
       gzip: ['gzip', gzipSync('{"jsonrpc":"2.0","id":1,"result":{}}')],
       br: ['br', brotliCompressSync('server exploded')],
@@ -95,9 +122,24 @@ describe('HTTP proxy edge cases', () => {
       const [encoding, body] = bodies[req.headers['x-want'] as string]!;
       res.writeHead(encoding === 'br' ? 500 : 200, { 'content-type': 'application/json', 'content-encoding': encoding }).end(body);
     });
-    for (const want of Object.keys(bodies)) await (await post(rpc(1, 'initialize'), { 'x-want': want })).arrayBuffer();
-    expect(logs()).toEqual([expect.stringMatching(/^\[http\] 500 Internal Server Error for POST \/mcp: \d+ bytes, br$/)]);
-    expect(store.messagesAfter(0).filter((message) => message.direction === 'server')).toHaveLength(1);
+    for (const want of Object.keys(bodies)) {
+      const response = await post(rpc(1, 'initialize'), { 'x-want': want });
+      expect(response.headers.get('content-encoding')).toBe(want === 'identity' ? 'identity' : null);
+      await response.arrayBuffer();
+    }
+    expect(logs()).toEqual(['[http] 500 Internal Server Error for POST /mcp: server exploded']);
+    expect(store.messagesAfter(0).filter((message) => message.direction === 'server')).toHaveLength(2);
+  });
+
+  it('passes replies in encodings it cannot read through untouched, and resets corrupt ones', async () => {
+    await start((req, res) => {
+      if (req.headers['x-want'] === 'corrupt') return res.writeHead(200, { 'content-type': 'application/json', 'content-encoding': 'gzip' }).end('not gzip');
+      res.writeHead(200, { 'content-type': 'application/json', 'content-encoding': 'x-opaque' }).end('opaque');
+    });
+    const response = await fetch(proxy!.url, { method: 'POST', headers: { 'content-type': 'application/json', 'accept-encoding': 'identity' }, body: rpc(1, 'initialize') });
+    expect(response.headers.get('content-encoding')).toBe('x-opaque');
+    expect(Buffer.from(await response.arrayBuffer()).toString()).toBe('opaque');
+    await expect(post(rpc(2, 'ping'), { 'x-want': 'corrupt' }).then((reply) => reply.text())).rejects.toThrow();
   });
 
   it('records an empty error body without detail', async () => {
