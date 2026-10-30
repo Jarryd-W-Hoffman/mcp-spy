@@ -143,6 +143,11 @@ describe('HTTP proxy with a policy', () => {
     expect(store.messagesAfter(0).filter((message) => message.mock !== null)).toEqual([]);
   });
 
+  it('refuses ask rules, which need mcpspy run', async () => {
+    await start({ rules: [{ tool: 'search', ask: 'Search?' }] });
+    expect(text((await post(call(1, 'search'))).reply)).toBe('Blocked by mcpspy policy: needs approval (Search?), but asking only works with mcpspy run');
+  });
+
   it('answers refusals without a session header when the agent sent none', async () => {
     await start({});
     const response = await fetch(proxy.url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(call(1, 'search')) });

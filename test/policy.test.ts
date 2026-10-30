@@ -25,9 +25,13 @@ describe('parsePolicy', () => {
     ['{"rules": [{"allow": false}]}', 'rules[0]: "allow" must be true'],
     ['{"rules": [{"deny": ""}]}', 'rules[0]: "deny" must be a reason'],
     ['{"rules": [{"deny": 5}]}', 'rules[0]: "deny" must be a reason'],
-    ['{"rules": [{}]}', 'rules[0] needs exactly one of "allow": true or "deny": "<reason>"'],
-    ['{"rules": [{"allow": true, "deny": "no"}]}', 'rules[0] needs exactly one of "allow": true or "deny": "<reason>"'],
+    ['{"rules": [{}]}', 'rules[0] needs exactly one of "allow": true, "deny": "<reason>" or "ask": "<prompt>"'],
+    ['{"rules": [{"allow": true, "deny": "no"}]}', 'rules[0] needs exactly one of "allow": true, "deny": "<reason>" or "ask": "<prompt>"'],
     ['{"rules": [{"deny": "no", "rate": "1/day"}]}', 'rules[0]: "rate" only applies to allow rules'],
+    ['{"rules": [{"ask": "ok?", "rate": "1/day"}]}', 'rules[0]: "rate" only applies to allow rules'],
+    ['{"rules": [{"ask": ""}]}', 'rules[0]: "ask" must be a prompt'],
+    ['{"rules": [{"ask": 1}]}', 'rules[0]: "ask" must be a prompt'],
+    ['{"rules": [{"ask": "ok?", "deny": "no"}]}', 'rules[0] needs exactly one of'],
     ['{"rules": [{"allow": true, "rate": "often"}]}', 'rules[0]: "rate" must look like "10/minute" (per second, minute, hour or day)'],
     ['{"rules": [{"allow": true, "rate": "0/minute"}]}', 'rules[0]: "rate" must look like'],
     ['{"rules": [{"allow": true, "rate": 5}]}', 'rules[0]: "rate" must look like'],
@@ -135,6 +139,26 @@ describe('PolicyEngine.check', () => {
       reason: '"path" is not allowed for read',
     });
     expect(policy.check('tools/call', call('read', { path: '/srv/a', opts: { mode: 'r' } })).allow).toBe(false);
+  });
+
+  it('turns ask rules into refusals that carry the prompt, keeping those tools listed', () => {
+    const policy = engine({
+      rules: [
+        { tool: 'deploy', where: { env: { in: ['staging'] } }, allow: true },
+        { name: 'prod deploys', tool: 'deploy', ask: 'Deploy to production?' },
+        { tool: 'push', where: { force: { in: [true] } }, ask: 'Force-push?' },
+      ],
+    });
+    expect(policy.check('tools/call', { name: 'deploy', arguments: { env: 'staging' } }).allow).toBe(true);
+    expect(policy.check('tools/call', { name: 'deploy', arguments: { env: 'prod' } })).toEqual({
+      allow: false,
+      rule: 'prod deploys',
+      reason: 'needs approval (Deploy to production?)',
+      ask: 'Deploy to production?',
+    });
+    // A failed test on an ask rule isn't what blocked the call, so it isn't named.
+    expect(policy.check('tools/call', { name: 'push', arguments: { force: false } })).toMatchObject({ reason: 'no rule allows push' });
+    expect(policy.filterToolList({ tools: [{ name: 'deploy' }, { name: 'push' }, { name: 'other' }] }).hidden).toEqual(['other']);
   });
 
   it('reads only own properties, so prototypes are out of reach', () => {
@@ -271,7 +295,7 @@ describe('policy files', () => {
     expect(policy.check('tools/call', call('z')).allow).toBe(true);
     expect(warnings).toEqual([
       `reloaded policy from ${path}`,
-      `kept previous policy; ${path}: rules[0] needs exactly one of "allow": true or "deny": "<reason>"`,
+      `kept previous policy; ${path}: rules[0] needs exactly one of "allow": true, "deny": "<reason>" or "ask": "<prompt>"`,
       expect.stringMatching(/^kept previous policy; .*ENOENT/),
       `reloaded policy from ${path}`,
     ]);

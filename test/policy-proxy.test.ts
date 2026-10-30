@@ -15,7 +15,7 @@ describe('stdio proxy with a policy', () => {
   beforeEach(() => (store = new Store(':memory:')));
   afterEach(() => store.close());
 
-  function start(file: PolicyFile | null, mocks?: MockFile) {
+  function start(file: PolicyFile | null, mocks?: MockFile, askTimeoutMs?: number) {
     const input = new PassThrough();
     const output = new PassThrough();
     const errorOutput = new PassThrough();
@@ -40,6 +40,7 @@ describe('stdio proxy with a policy', () => {
       forwardSignals: [],
       policy: file ? new PolicyEngine(null, 'echo', process.cwd(), () => {}, parsePolicy(JSON.stringify(file), '/')) : undefined,
       mocks: mocks ? new MockEngine(null, 'echo', () => {}, mocks) : undefined,
+      askTimeoutMs,
     });
     return {
       lines,
@@ -193,6 +194,82 @@ describe('stdio proxy with a policy', () => {
     proxy.send(tool(3, 'stocks'));
     expect(text(await proxy.reply(3))).toBe('Blocked by mcpspy policy: no rule allows stocks');
     await proxy.end();
+  });
+
+  describe('ask rules', () => {
+    const policy: PolicyFile = { rules: [{ name: 'check echo', tool: 'echo', ask: 'Echo this?' }] };
+    const initialize = (elicitation: boolean) => ({ jsonrpc: '2.0', id: 0, method: 'initialize', params: { capabilities: elicitation ? { elicitation: {} } : {} } });
+    const asked = async (proxy: ReturnType<typeof start>, id: string) => {
+      for (;;) {
+        const found = proxy.lines.find((line) => line.id === id && line.method === 'elicitation/create');
+        if (found) return found as Line & { params: { message: string } };
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+    };
+
+    it('holds the call, asks the agent, and forwards it once accepted', async () => {
+      const proxy = start(policy);
+      proxy.send(initialize(true));
+      await proxy.reply(0);
+      proxy.send(tool(1, 'echo', { text: 'approved' }));
+      const ask = await asked(proxy, 'mcpspy-ask-1');
+      expect(ask.params).toEqual({ message: 'Echo this?\n\nmcpspy is holding tools/call echo {"text":"approved"}. Accept to let it through.', requestedSchema: { type: 'object', properties: {} } });
+      expect(proxy.lines.some((line) => line.id === 1)).toBe(false);
+      proxy.send({ jsonrpc: '2.0', id: 'mcpspy-ask-1', result: { action: 'accept', content: {} } });
+      expect(text(await proxy.reply(1))).toBe('approved');
+
+      proxy.send(tool(2, 'echo', { text: 'x'.repeat(600) }));
+      expect((await asked(proxy, 'mcpspy-ask-2')).params.message).toContain(`${'x'.repeat(490)}…`);
+      proxy.send({ jsonrpc: '2.0', id: 'mcpspy-ask-2', result: { action: 'decline' } });
+      expect(text(await proxy.reply(2))).toBe('Blocked by mcpspy policy: Echo this? (the user declined)');
+      proxy.send(tool(3, 'echo'));
+      await asked(proxy, 'mcpspy-ask-3');
+      proxy.send({ jsonrpc: '2.0', id: 'mcpspy-ask-3', error: { code: -1, message: 'no UI' } });
+      expect(text(await proxy.reply(3))).toBe('Blocked by mcpspy policy: Echo this? (the user declined)');
+      // Answers to asks the proxy never made go to the server like any other response.
+      proxy.send({ jsonrpc: '2.0', id: 'mcpspy-ask-99', result: {} });
+      await proxy.end();
+      expect(proxy.warnings()).toContain('[mcpspy] policy approved tools/call echo (check echo) after asking\n');
+      expect(proxy.warnings()).toContain('[mcpspy] policy denied tools/call echo (check echo) after asking: the user declined\n');
+    });
+
+    it('asks about other methods too, several at a time', async () => {
+      const proxy = start({ rules: [{ method: 'resources/read', ask: 'Read it?' }] });
+      proxy.send(initialize(true));
+      proxy.send({ jsonrpc: '2.0', id: 1, method: 'resources/read', params: { uri: 'file:///a' } });
+      proxy.send({ jsonrpc: '2.0', id: 2, method: 'resources/read' });
+      expect((await asked(proxy, 'mcpspy-ask-1')).params.message).toContain('holding resources/read {"uri":"file:///a"}.');
+      expect((await asked(proxy, 'mcpspy-ask-2')).params.message).toContain('holding resources/read {}.');
+      proxy.send({ jsonrpc: '2.0', id: 'mcpspy-ask-2', result: { action: 'cancel' } });
+      expect((await proxy.reply(2)).error).toMatchObject({ code: POLICY_ERROR, message: 'Blocked by mcpspy policy: Read it? (the user declined)' });
+      proxy.send({ jsonrpc: '2.0', id: 'mcpspy-ask-1', result: { action: 'accept' } });
+      expect((await proxy.reply(1)).error).toMatchObject({ message: 'Method not found' });
+      await proxy.end();
+    });
+
+    it('refuses when nobody answers in time, or the agent goes away first', async () => {
+      const proxy = start(policy, undefined, 40);
+      proxy.send(initialize(true));
+      proxy.send(tool(1, 'echo'));
+      expect(text(await proxy.reply(1))).toBe('Blocked by mcpspy policy: Echo this? (no answer in time)');
+      proxy.send(tool(2, 'echo'));
+      await asked(proxy, 'mcpspy-ask-2');
+      await proxy.end();
+      expect(text(proxy.lines.find((line) => line.id === 2)!)).toBe('Blocked by mcpspy policy: Echo this? (the agent closed its input before answering)');
+    });
+
+    it("refuses when the agent can't be asked, and drops asked-about notifications", async () => {
+      const proxy = start(policy);
+      proxy.send(tool(1, 'echo'));
+      expect(text(await proxy.reply(1))).toBe("Blocked by mcpspy policy: needs approval (Echo this?), but the agent can't be asked");
+      proxy.send(initialize(false));
+      proxy.send({ jsonrpc: '2.0', id: 2, method: 'initialize' });
+      proxy.send({ jsonrpc: '2.0', method: 'tools/call', params: { name: 'echo' } });
+      proxy.send(tool(3, 'echo'));
+      expect(text(await proxy.reply(3))).toContain("but the agent can't be asked");
+      await proxy.end();
+      expect(proxy.lines.filter((line) => line.method === 'elicitation/create')).toEqual([]);
+    });
   });
 
   it('sends requests a mock rule is delaying before ending the server input', async () => {

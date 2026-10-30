@@ -332,6 +332,7 @@ A policy decides which calls an agent may make. mcpspy checks each request befor
     { "tool": "read_file", "where": { "path": { "under": ["./src", "./docs"] } }, "allow": true },
     { "tool": "query", "where": { "sql": { "match": "^select ", "notMatch": ";" }, "limit": { "max": 500 } }, "allow": true },
     { "tool": "search", "rate": "20/minute", "allow": true },
+    { "tool": "deploy", "ask": "Deploy this to production?" },
     { "method": "resources/read", "where": { "uri": { "match": "^secret:" } }, "deny": "secret resources are off limits" }
   ],
   "results": { "maxBytes": 200000, "redact": ["ghp_[A-Za-z0-9]{36}"] }
@@ -353,6 +354,9 @@ flowchart LR
     R -->|"deny, a failed test,<br/>or rate limit reached"| D["Refusal with the reason,<br/>recorded as [policy: rule]"]
     R -->|"none, and default deny"| D
     R -->|allow| F["The message as checked<br/>(re-serialised)"] --> M["Mock rules"] --> S["Server"]
+    R -->|ask| Q["Hold the call, ask the<br/>agent's user (elicitation)"]
+    Q -->|accept| F
+    Q -->|"decline, no answer,<br/>or no way to ask"| D
     S --> L{"Reply"}
     L -->|tools/list| H["Hide tools no call<br/>could use"] --> A
     L -->|tool result| C["Redact matches,<br/>cap the size"] --> A
@@ -360,7 +364,7 @@ flowchart LR
     D --> A
 ```
 
-- **Rules** are checked in order, and the first one that matches decides. A rule matches on `tool` (with `*` wildcards), or `method` for anything other than `tools/call`, and on `server` (the `--name`, with wildcards). It may also have a `where` of tests on the arguments (or a request's params), keyed by dot path. It then either `allow`s (`true`) or `deny`s, giving a reason the agent sees. When an allow rule's tests fail, the refusal names the argument (`"path" is not allowed for read_file`).
+- **Rules** are checked in order, and the first one that matches decides. A rule matches on `tool` (with `*` wildcards), or `method` for anything other than `tools/call`, and on `server` (the `--name`, with wildcards). It may also have a `where` of tests on the arguments (or a request's params), keyed by dot path. It then `allow`s (`true`), `deny`s with a reason the agent sees, or `ask`s with a prompt. When an allow rule's tests fail, the refusal names the argument (`"path" is not allowed for read_file`).
 - **Tests**:
   - `under` (directories, relative to the policy file): the path must be inside one of them once symlinks are followed, so `src/../../etc` and a link out of `src/` both fail. A relative path in the arguments is resolved against the server's working directory.
   - `in`: one of a list of values.
@@ -370,6 +374,7 @@ flowchart LR
 
   A missing argument fails every test.
 - **Default**: a tool call no rule matches is denied, unless the file says `"default": "allow"`. Other methods, such as `initialize` and `tools/list`, pass unless a rule names them.
+- **Asking**: an `ask` rule holds the call and asks the agent's user, through MCP elicitation, whether to let it through. The call goes ahead only if the user accepts. It's refused if they decline, if nobody answers within two minutes, or if the agent closes its connection first. It's also refused if the agent didn't declare elicitation support, or if the server is behind `mcpspy proxy`: the HTTP proxy has no way to ask.
 - **Rates**: `rate` on an allow rule (`"10/minute"`, per `second`, `minute`, `hour` or `day`) refuses calls beyond the limit, over a sliding window.
 - **Tool lists** lose the tools no call could be allowed to use, so the agent doesn't plan around them. A tool that some arguments could unlock stays listed.
 - **Results**: `maxBytes` replaces an oversized tool result with an error, and `redact` replaces matches in what the agent receives. This is unlike [Secrets](#-secrets), which only changes the record.

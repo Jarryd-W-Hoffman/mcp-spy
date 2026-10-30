@@ -26,6 +26,8 @@ export interface StdioProxyOptions {
   mocks?: MockEngine;
   /** A policy the agent's requests must pass; traffic is handled line by line, as with mocks. */
   policy?: PolicyEngine;
+  /** How long a policy's ask waits for the agent's user; two minutes by default. */
+  askTimeoutMs?: number;
   /** What to remove from the record; built-in secret patterns by default. */
   redactor?: Redactor;
 }
@@ -107,6 +109,7 @@ export function runStdioProxy(options: StdioProxyOptions): Promise<StdioProxyRes
             toClient,
             recordReply: (line, rule) => record(() => recorder.frame('server', line, rule)),
             warn: (message) => errorOutput.write(`[mcpspy] ${message}\n`),
+            askTimeoutMs: options.askTimeoutMs,
           })
         : null;
 
@@ -148,6 +151,7 @@ export function runStdioProxy(options: StdioProxyOptions): Promise<StdioProxyRes
     const onInputEnd = (): void => {
       if (!interceptor) return void child.stdin.end();
       fromClient.flush();
+      interceptor.inputEnded();
       // Requests a rule is still delaying go to the server before its input ends.
       interceptor.whenIdle(() => child.stdin.end());
     };
