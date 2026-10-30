@@ -992,19 +992,6 @@ describe('mcpspy wrap and unwrap', () => {
     return path;
   };
 
-  it('keeps compact files compact', async () => {
-    const path = config('{"mcpServers":{"a":{"command":"node","args":["a.js"]},"b":{"url":"http://x"}}}');
-    const result = await cli(['wrap', path, '--command', '/bin/mcpspy', '--db', 'x.db', '--mocks', 'm.json']);
-    expect(result.stdout).toMatch(/wrapped {2}a/);
-    expect(result.stdout).toMatch(/skipped {2}b: /);
-    expect(result.stdout).toContain('Wrapped 1 server in');
-    const text = readFileSync(path, 'utf8');
-    expect(text).toMatch(/^\{\n {2}"mcpServers"/);
-    expect(text.endsWith('}')).toBe(true);
-    const unwrapped = await cli(['unwrap', path, '--only', 'a']);
-    expect(unwrapped.stdout).toContain('Unwrapped 1 server in');
-  });
-
   it('warns when the policy sits where the servers it governs could write it', async () => {
     const project = dir();
     const path = join(project, 'mcp.json');
@@ -1025,6 +1012,19 @@ describe('mcpspy wrap and unwrap', () => {
     } finally {
       process.chdir(cwd);
     }
+  });
+
+  it('keeps compact files compact', async () => {
+    const path = config('{"mcpServers":{"a":{"command":"node","args":["a.js"]},"b":{"url":"http://x"}}}');
+    const result = await cli(['wrap', path, '--command', '/bin/mcpspy', '--db', 'x.db', '--mocks', 'm.json']);
+    expect(result.stdout).toMatch(/wrapped {2}a/);
+    expect(result.stdout).toMatch(/skipped {2}b: /);
+    expect(result.stdout).toContain('Wrapped 1 server in');
+    const text = readFileSync(path, 'utf8');
+    expect(text).toMatch(/^\{\n {2}"mcpServers"/);
+    expect(text.endsWith('}')).toBe(true);
+    const unwrapped = await cli(['unwrap', path, '--only', 'a']);
+    expect(unwrapped.stdout).toContain('Unwrapped 1 server in');
   });
 
   it('adds a checked policy, by absolute path', async () => {

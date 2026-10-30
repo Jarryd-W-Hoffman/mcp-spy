@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process';
 import { createReadStream, existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
-import { dirname, resolve } from 'node:path';
+import { resolve } from 'node:path';
 import { createInterface } from 'node:readline';
 import { parseArgs } from 'node:util';
 import { comparableBody, diffLines, hunks, jsonLines } from './diff.js';
@@ -1107,7 +1107,7 @@ function wrapCommand(argv: string[], mode: 'wrap' | 'unwrap'): void {
   if (policy !== undefined) loadPolicy(policy, null);
 
   const text = readFileSync(path, 'utf8');
-  if (policy !== undefined) warnIfWritable(policy, dirname(resolve(path)), "the config's directory, where its servers usually run");
+  if (policy !== undefined) warnIfWritable(policy, resolve(path, '..'), "the config's directory, where its servers usually run");
   let config: unknown;
   try {
     config = JSON.parse(text);
