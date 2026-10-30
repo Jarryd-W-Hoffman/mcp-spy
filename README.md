@@ -430,7 +430,7 @@ The tools/list reply above lost `write_file` and `delete_branch`, which no rule 
     <img src="docs/policy-tools.png" alt="A tools/list response with write_file and delete_branch hidden by the policy." width="900">
 </p>
 
-Policies work the same over HTTP: `mcpspy proxy <url> --policy policy.json` answers refusals itself, and filters and limits replies whether the server answers in JSON or over SSE. A relative path in a remote server's arguments is resolved against the directory `mcpspy proxy` runs in, since the server's own directory is unknown.
+Policies work the same over HTTP: `mcpspy proxy <url> --policy policy.json` answers refusals itself, and filters and limits replies whether the server answers in JSON or over SSE. A remote server's working directory and home aren't known, so an `under` test there only accepts absolute paths and `file:` URIs.
 
 ### 🔒 Secrets
 
