@@ -641,7 +641,7 @@ Images are costed by their pixel dimensions (read from the PNG, GIF, JPEG or Web
 Recorded traffic often holds secrets: tokens in tool arguments, private documents in results. So:
 
 - **Only localhost.** The UI and the HTTP proxy bind to `127.0.0.1` and refuse requests whose `Host` isn't a loopback name, which stops DNS-rebinding attacks from a web page. The proxy also refuses a non-local `Origin`.
-- **Replay can't be triggered cross-site.** Replay starts processes, so its endpoint also requires a custom header and a JSON body. A cross-site request can't send those without a CORS preflight, and mcpspy never approves one. It also checks `Origin` and `Sec-Fetch-Site`. `mcpspy ui --read-only` turns replay off entirely.
+- **Replay can't be triggered cross-site.** Replay starts processes, so its endpoint also requires a custom header and a JSON body. A cross-site request can't send those without a CORS preflight, and mcpspy never approves one. It also checks `Origin` and `Sec-Fetch-Site`. No other site may frame the UI (`X-Frame-Options: DENY`, `frame-ancestors 'none'`), so a hidden frame can't trick you into clicking Replay. `mcpspy ui --read-only` turns replay off entirely.
 - **Secrets are removed before they're stored.** Well-known credential formats and the values of secret-sounding keys are replaced with `[REDACTED]` in everything recorded. See [Secrets](#-secrets).
 - **Names, not values.** For stdio servers, mcpspy stores the names of environment variables (so replay can say which are missing), never their values. Over HTTP, headers are never stored at all.
 - **Opt-in network calls.** Nothing is sent anywhere unless you run `mcpspy tokens --exact`, which says so in its help.
