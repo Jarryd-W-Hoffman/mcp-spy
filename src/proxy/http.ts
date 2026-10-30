@@ -54,8 +54,8 @@ interface Tracked {
   open: boolean;
   /** When the agent or server last sent anything in this session. */
   lastSeen: number;
-  /** Event streams open for this session; it never goes idle while one is. */
-  streams: number;
+  /** HTTP exchanges in flight (requests awaiting a reply, open event streams); it never goes idle while one is. */
+  busy: number;
 }
 
 /**
@@ -104,10 +104,23 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
       pid: null,
       started_at: Date.now(),
     });
-    const tracked = { sessionId, recorder: new Recorder(store, sessionId, undefined, redactor), open: true, lastSeen: Date.now(), streams: 0 };
+    const tracked = { sessionId, recorder: new Recorder(store, sessionId, undefined, redactor), open: true, lastSeen: Date.now(), busy: 0 };
     all.add(tracked);
     return tracked;
   };
+  const held = new WeakSet<ServerResponse>();
+  /** Keeps a session alive until this exchange's response closes. Counted once, though a legacy stream is only tied to its session late. */
+  const hold = (tracked: Tracked, res: ServerResponse): void => {
+    tracked.lastSeen = Date.now();
+    if (held.has(res)) return;
+    held.add(res);
+    tracked.busy++;
+    res.on('close', () => {
+      tracked.busy--;
+      tracked.lastSeen = Date.now();
+    });
+  };
+
   /** Ends a session in the log and forgets it, so a request naming it later starts a new one. */
   const end = (tracked: Tracked): void => {
     if (!tracked.open) return;
@@ -158,7 +171,7 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
       }
     }
     // A GET without a session is the legacy transport's event stream (or not MCP at all); tracked once we see SSE.
-    if (tracked) tracked.lastSeen = Date.now();
+    if (tracked) hold(tracked, res);
 
     let forwarded = body;
     if (tracked && method === 'POST' && text.trim() !== '') {
@@ -250,13 +263,7 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
         res.writeHead(up.statusCode!, responseHeaders);
         res.flushHeaders();
         const session = tracked;
-        if (session) {
-          session.streams++;
-          res.on('close', () => {
-            session.streams--;
-            session.lastSeen = Date.now();
-          });
-        }
+        if (session) hold(session, res);
         if (encoded) {
           // We asked for identity; if the server compressed anyway, forward as-is and read a decompressed copy.
           up.pipe(res);
@@ -398,7 +405,7 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
   const idleMs = options.sessionIdleMs ?? 30 * 60_000;
   const sweep = setInterval(
     () => {
-      for (const tracked of all) if (tracked.streams === 0 && Date.now() - tracked.lastSeen > idleMs) end(tracked);
+      for (const tracked of all) if (tracked.busy === 0 && Date.now() - tracked.lastSeen > idleMs) end(tracked);
     },
     Math.min(idleMs, 60_000),
   ).unref();
