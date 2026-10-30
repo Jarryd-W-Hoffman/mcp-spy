@@ -257,6 +257,32 @@ describe('mcpspy proxy', () => {
     }
   });
 
+  it('holds an HTTP server to a policy, and refuses to listen with a broken one', async () => {
+    const fixture = await startHttpFixture();
+    const policy = join(dir(), 'policy.json');
+    writeFileSync(policy, '{"default": "deny"}');
+    try {
+      const result = await cli(['proxy', fixture.url, '--port', '0', '--policy', policy, '--db', tmpDb()]);
+      const url = /Point your agent at (\S+)/.exec(result.stderr)![1]!;
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream' },
+        body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'echo', arguments: { text: 'hi' } } }),
+      });
+      expect(await response.text()).toContain('Blocked by mcpspy policy: no rule allows echo');
+      const exited = new Promise<number>((resolve) => vi.spyOn(process, 'exit').mockImplementation(((code: number) => resolve(code)) as never));
+      result.signals.get('SIGINT')!();
+      expect(await exited).toBe(0);
+
+      writeFileSync(policy, '{"rules": 1}');
+      const broken = await cli(['proxy', fixture.url, '--port', '0', '--policy', policy, '--db', tmpDb()]);
+      expect(broken.code).toBe(2);
+      expect(broken.stderr).toContain('"rules" must be an array');
+    } finally {
+      await fixture.close();
+    }
+  });
+
   it('proxies without extra headers', async () => {
     const fixture = await startHttpFixture();
     try {
