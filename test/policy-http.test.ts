@@ -27,7 +27,7 @@ async function upstream() {
           : message.method === 'tools/call'
             ? { content: [{ type: 'text', text: message.params?.arguments?.text ?? 'done' }] }
             : {};
-      const reply = JSON.stringify(message.method === 'boom' ? { jsonrpc: '2.0', id: message.id, error: { code: -1, message: 'boom' } } : { jsonrpc: '2.0', id: message.id, result });
+      const reply = JSON.stringify(message.method === 'boom' || message.params?.name === 'fail' ? { jsonrpc: '2.0', id: message.id, error: { code: -1, message: 'boom' } } : { jsonrpc: '2.0', id: message.id, result });
       if (req.headers['x-sse']) {
         res.writeHead(200, { 'content-type': 'text/event-stream', 'mcp-session-id': 'S' });
         res.end(`event: message\ndata: ${reply}\n\n`);
@@ -134,6 +134,13 @@ describe('HTTP proxy with a policy', () => {
       'policy: refused a request body that is not JSON',
       'policy denied notifications/secret (rules[0]): hush',
     ]);
+  });
+
+  it('passes tool errors and full tool lists through unchanged', async () => {
+    await start({ default: 'allow', results: { maxBytes: 1000 } });
+    expect((await post({ jsonrpc: '2.0', id: 1, method: 'tools/list' })).reply).toMatchObject({ result: { tools } });
+    expect((await post(call(2, 'fail'))).reply).toMatchObject({ error: { message: 'boom' } });
+    expect(store.messagesAfter(0).filter((message) => message.mock !== null)).toEqual([]);
   });
 
   it('answers refusals without a session header when the agent sent none', async () => {

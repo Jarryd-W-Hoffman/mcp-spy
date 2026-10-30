@@ -392,7 +392,7 @@ The tools/list reply above lost `write_file` and `delete_branch`, which no rule 
     <img src="docs/policy-tools.png" alt="A tools/list response with write_file and delete_branch hidden by the policy." width="900">
 </p>
 
-Policies apply to `mcpspy run` (stdio servers) for now. `mcpspy proxy` doesn't take `--policy` yet.
+Policies work the same over HTTP: `mcpspy proxy <url> --policy policy.json` answers refusals itself, and filters and limits replies whether the server answers in JSON or over SSE. A relative path in a remote server's arguments is resolved against the directory `mcpspy proxy` runs in, since the server's own directory is unknown.
 
 ### 🔒 Secrets
 
@@ -418,7 +418,7 @@ Patterns can't catch everything, such as a password in free text with nothing ar
 | `mcpspy wrap [<config>] [--only <name>] [--dry-run] [--command <path>] [--policy <file>]` | Put mcpspy in front of the stdio servers in an MCP config (`.mcp.json` by default). |
 | `mcpspy unwrap [<config>] [--only <name>] [--dry-run]` | Take it out again, restoring each server's command and args. |
 | `mcpspy run [--name <label>] [--policy <file>] [--mocks <file>] [--redact <regex>] [--no-redact] -- <cmd> [args…]` | Start a stdio server behind the proxy. `--policy` decides which calls the agent may make. `mcpspy -- <cmd>` is shorthand. |
-| `mcpspy proxy <url> [--port 7800] [--name <label>] [--mocks <file>] [-H 'Name: value']` | Proxy a server reached over HTTP (Streamable HTTP or HTTP+SSE). `-H` adds a header, such as a token, to every request. Takes `--redact` and `--no-redact` like `run`. |
+| `mcpspy proxy <url> [--port 7800] [--name <label>] [--policy <file>] [--mocks <file>] [-H 'Name: value']` | Proxy a server reached over HTTP (Streamable HTTP or HTTP+SSE). `-H` adds a header, such as a token, to every request. Takes `--redact` and `--no-redact` like `run`. |
 | `mcpspy ui [--port 7777] [--open] [--read-only]` | Serve the web inspector on localhost. `--read-only` turns replay off. |
 | `mcpspy tail [-f] [-n 50] [--session <id>] [--json]` | Print recorded messages; `-f` follows new ones, `--json` prints NDJSON rows. |
 | `mcpspy sessions [--limit 20]` | List recorded sessions with their status and message count. |
@@ -745,7 +745,7 @@ Numbers vary from run to run and machine to machine; a laptop's clock speed alon
 - **Replays from the UI can't send headers.** HTTP servers that need `Authorization` fail there with a 401 and a hint; use `mcpspy replay -H` instead.
 - **Mock rules apply to single requests.** Batched requests always go to the real server.
 - **Very large results are slower to pass through.** A 5 MB result takes a few hundred milliseconds longer, mostly to scan it for secrets. See [Performance](#performance).
-- **Policies are for stdio servers, and test values, not meaning.** `mcpspy proxy` doesn't enforce one yet. A pattern such as `^select ` narrows what a query tool receives, but it isn't a SQL parser. For a hard guarantee, give the server credentials that can only read.
+- **Policies test values, not meaning.** A pattern such as `^select ` narrows what a query tool receives, but it isn't a SQL parser. For a hard guarantee, give the server credentials that can only read.
 - **Token estimates are estimates.** Use them to compare sizes, or `--exact` for real numbers.
 - **One log per machine by default.** Sessions from every project share `~/.mcpspy/mcpspy.db`; use `--db` or `MCPSPY_DB` to keep a project's traffic apart.
 
