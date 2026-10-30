@@ -1216,7 +1216,7 @@ async function ui(argv: string[]): Promise<void> {
   const store = new Store(values.db);
   retainByEnvironment(store);
   const staticDir = resolveUiDir();
-  const server = await startUiServer({ store, port: parseId(values.port, '--port'), staticDir, readOnly: values['read-only'] }).catch((error: NodeJS.ErrnoException) => {
+  const server = await startUiServer({ store, port: parseId(values.port, '--port'), staticDir, readOnly: values['read-only'], key: crypto.randomUUID().replaceAll('-', '') }).catch((error: NodeJS.ErrnoException) => {
     if (error.code === 'EADDRINUSE') fail(`port ${values.port} is in use; pick another with --port`);
     throw error;
   });

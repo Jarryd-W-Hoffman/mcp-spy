@@ -1,3 +1,4 @@
+import { timingSafeEqual } from 'node:crypto';
 import { createReadStream, existsSync, statSync } from 'node:fs';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -18,6 +19,12 @@ export interface UiServerOptions {
   pollInterval?: number;
   /** Disables replay, so the UI can only read. */
   readOnly?: boolean;
+  /**
+   * A secret every request must carry. Loopback is shared by every user on the
+   * machine, so without it any of them could read the log through the API, or
+   * replay calls as you. The URL carries it once; the server swaps it for a cookie.
+   */
+  key?: string;
 }
 
 export interface UiServer {
@@ -141,6 +148,7 @@ export async function startUiServer(options: UiServerOptions): Promise<UiServer>
       return;
     }
     const url = new URL(req.url!, 'http://localhost');
+    if (options.key !== undefined && !admitted(req, res, url, options.key)) return;
     if (req.method === 'POST' && url.pathname === '/api/replay') {
       void handleReplay(req, res);
       return;
@@ -221,6 +229,34 @@ export async function startUiServer(options: UiServerOptions): Promise<UiServer>
     serveStatic(url.pathname, res);
   }
 
+  /**
+   * Whether the request holds the key in its cookie. One with the key in its query
+   * gets the cookie and is sent back to the same page without it, so the key leaves
+   * the address bar and history. Every other request is refused.
+   */
+  function admitted(req: IncomingMessage, res: ServerResponse, url: URL, key: string): boolean {
+    const cookie = `mcpspy_key_${(server.address() as AddressInfo).port}`;
+    const offered = url.searchParams.get('key');
+    if (offered !== null && req.method === 'GET' && same(offered, key)) {
+      url.searchParams.delete('key');
+      res.writeHead(303, {
+        location: `${url.pathname}${url.search}`,
+        'set-cookie': `${cookie}=${key}; Path=/; HttpOnly; SameSite=Strict`,
+        'cache-control': 'no-store',
+      });
+      res.end();
+      return false;
+    }
+    const held = (req.headers.cookie ?? '')
+      .split(';')
+      .map((part) => part.trim())
+      .find((part) => part.startsWith(`${cookie}=`));
+    if (held !== undefined && same(held.slice(cookie.length + 1), key)) return true;
+    res.writeHead(401, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' });
+    res.end('Open the link mcpspy ui printed: it carries the key to this UI.\n');
+    return false;
+  }
+
   function serveStatic(pathname: string, res: ServerResponse): void {
     if (staticDir === null) {
       json(res, 404, { error: 'web UI not built; run npm run build' });
@@ -254,9 +290,10 @@ export async function startUiServer(options: UiServerOptions): Promise<UiServer>
   });
   const { port } = server.address() as AddressInfo;
 
+  const base = `http://${host === '127.0.0.1' || host === '::1' ? 'localhost' : host}:${port}`;
   return {
     server,
-    url: `http://${host === '127.0.0.1' || host === '::1' ? 'localhost' : host}:${port}`,
+    url: options.key !== undefined ? `${base}/?key=${options.key}` : base,
     close: () =>
       new Promise((resolvePromise) => {
         clearInterval(poll);
@@ -264,6 +301,12 @@ export async function startUiServer(options: UiServerOptions): Promise<UiServer>
         server.close(() => resolvePromise());
       }),
   };
+}
+
+/** Compares secrets in constant time. */
+function same(a: string, b: string): boolean {
+  const [left, right] = [Buffer.from(a), Buffer.from(b)];
+  return left.length === right.length && timingSafeEqual(left, right);
 }
 
 function json(res: ServerResponse, status: number, body: unknown): void {
