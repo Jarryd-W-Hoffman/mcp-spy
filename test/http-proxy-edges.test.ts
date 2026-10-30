@@ -395,6 +395,21 @@ describe('HTTP proxy session lifetimes', () => {
     await vi.waitFor(() => expect(ended()).toEqual([true]));
   });
 
+  it('keeps a session while a request waits for a slow reply', async () => {
+    await start((req, res) => {
+      if (req.headers['mcp-session-id'] === undefined) return json(req, res);
+      setTimeout(() => json(req, res), 150);
+    }, 30);
+    await post(rpc(1, 'initialize'));
+    const slow = post(rpc(2, 'tools/call'), 's1');
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(ended()).toEqual([false]);
+    await slow;
+    expect(ended()).toEqual([false]);
+    expect(store.listSessions()[0]!.message_count).toBe(4);
+    await vi.waitFor(() => expect(ended()).toEqual([true]));
+  });
+
   it('records nothing more into a session once it has ended', async () => {
     await start((req, res) => (req.method === 'DELETE' ? res.writeHead(200).end() : json(req, res)));
     await post(rpc(1, 'initialize'));
