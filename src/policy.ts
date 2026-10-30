@@ -78,7 +78,7 @@ interface CompiledRule {
 }
 
 /** Takes the value and the server's directory, which relative paths are resolved against. */
-type CompiledTest = (value: unknown, cwd: string) => boolean;
+type CompiledTest = (value: unknown, cwd: string | null) => boolean;
 
 export interface CompiledPolicy {
   defaultAllow: boolean;
@@ -222,8 +222,11 @@ export class PolicyEngine {
   constructor(
     private readonly path: string | null,
     private readonly serverName: string | null,
-    /** The server's working directory, which relative paths in arguments are resolved against. */
-    private readonly cwd: string,
+    /**
+     * The server's working directory, which relative paths in arguments are
+     * resolved against; null when it isn't known (a server reached over HTTP).
+     */
+    private readonly cwd: string | null,
     private readonly warn: (message: string) => void = () => {},
     initial?: CompiledPolicy,
     private readonly now: () => number = Date.now,
@@ -283,7 +286,7 @@ export class PolicyEngine {
     let changed = false;
     let limited = result;
     if (redact.length > 0) {
-      limited = mapStrings(result, (text) => redact.reduce((out, pattern) => out.replace(pattern, '[redacted by policy]'), text));
+      limited = this.redacted(result);
       changed = JSON.stringify(limited) !== JSON.stringify(result);
     }
     if (maxBytes !== null) {
@@ -294,6 +297,32 @@ export class PolicyEngine {
       }
     }
     return { result: limited, change: changed ? 'result redacted' : null };
+  }
+
+  /**
+   * Applies `redact` to any other message from the server: results of other
+   * methods (resources/read, prompts/get, …), its requests (sampling text goes
+   * straight to a model) and notifications (log data). Only result, params and
+   * error are touched, never the envelope, so a broad pattern can't break the
+   * protocol. Null when nothing matched.
+   */
+  redactMessage(message: Record<string, unknown>): Record<string, unknown> | null {
+    this.reload();
+    if (this.policy.redact.length === 0) return null;
+    let changed = false;
+    const out = { ...message };
+    for (const key of ['result', 'params', 'error']) {
+      if (!(key in message)) continue;
+      const mapped = this.redacted(message[key]);
+      if (JSON.stringify(mapped) === JSON.stringify(message[key])) continue;
+      out[key] = mapped;
+      changed = true;
+    }
+    return changed ? out : null;
+  }
+
+  private redacted(value: unknown): unknown {
+    return mapStrings(value, (text) => this.policy.redact.reduce((out, pattern) => out.replace(pattern, '[redacted by policy]'), text));
   }
 
   private mayAllow(tool: string): boolean {
@@ -358,16 +387,20 @@ export class PolicyEngine {
 /**
  * Whether `value`, a path or file: URI, is inside one of `roots` once
  * symlinks are followed, so a link inside an allowed directory can't reach
- * out of it. Relative paths are resolved against the server's directory.
+ * out of it. Relative paths are resolved against the server's directory; when
+ * that isn't known (`cwd` null, for servers over HTTP), only absolute paths
+ * and file: URIs can be judged, and anything else is refused.
  */
-export function isUnder(value: string, roots: string[], cwd: string): boolean {
+export function isUnder(value: string, roots: string[], cwd: string | null): boolean {
   // Servers commonly expand a leading ~ to the home directory (the reference
-  // filesystem server does), so read it as they would. ~user can't be read here.
-  if (value === '~' || value.startsWith('~/')) value = join(homedir(), value.slice(1));
+  // filesystem server does), so read it as they would. ~user can't be read
+  // here, and nor can a remote server's home.
+  if (cwd !== null && (value === '~' || value.startsWith('~/'))) value = join(homedir(), value.slice(1));
   else if (value.startsWith('~')) return false;
+  if (cwd === null && !value.startsWith('file:') && !isAbsolute(value)) return false;
   let path: string;
   try {
-    path = value.startsWith('file:') ? fileURLToPath(value) : resolve(cwd, value);
+    path = value.startsWith('file:') ? fileURLToPath(value) : resolve(cwd ?? '/', value);
   } catch {
     return false;
   }

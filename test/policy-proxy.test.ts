@@ -10,6 +10,81 @@ import { echoServer } from './helpers.js';
 
 type Line = Record<string, unknown> & { id?: unknown; result?: Record<string, unknown>; error?: Record<string, unknown> };
 
+describe('redacting everything the server sends', () => {
+  const setup = (results: object | null = { redact: ['sk-\\w+'], maxBytes: 300 }) => {
+    const file = { rules: [{ tool: 'search', allow: true }, { tool: 'read', allow: true }], ...(results ? { results } : {}) };
+    const interceptor = new Interceptor({
+      mocks: null,
+      policy: new PolicyEngine(null, 'echo', '/', () => {}, parsePolicy(JSON.stringify(file), '/')),
+      toServer: () => {},
+      toClient: () => {},
+      recordReply: () => {},
+      warn: () => {},
+    });
+    const from = (message: unknown) => {
+      const { line, rule } = interceptor.fromServer(JSON.stringify(message));
+      return { message: JSON.parse(line) as unknown, rule };
+    };
+    return { interceptor, from };
+  };
+
+  it('redacts results, requests, notifications and errors, but never the envelope', () => {
+    const { interceptor, from } = setup();
+    interceptor.fromClient(JSON.stringify({ jsonrpc: '2.0', id: 'sk-id', method: 'resources/read', params: { uri: 'file:///.env' } }));
+    expect(from({ jsonrpc: '2.0', id: 'sk-id', result: { contents: [{ uri: 'file:///.env', text: 'KEY=sk-live1' }] } })).toEqual({
+      message: { jsonrpc: '2.0', id: 'sk-id', result: { contents: [{ uri: 'file:///.env', text: 'KEY=[redacted by policy]' }] } },
+      rule: 'policy: redacted',
+    });
+    expect(from({ jsonrpc: '2.0', method: 'notifications/message', params: { level: 'info', data: 'using sk-live2' } }).message).toEqual({
+      jsonrpc: '2.0',
+      method: 'notifications/message',
+      params: { level: 'info', data: 'using [redacted by policy]' },
+    });
+    expect((from({ jsonrpc: '2.0', id: 's1', method: 'sampling/createMessage', params: { messages: [{ role: 'user', content: { type: 'text', text: 'sk-live3' } }] } }).message as { params: unknown }).params).toEqual({
+      messages: [{ role: 'user', content: { type: 'text', text: '[redacted by policy]' } }],
+    });
+    expect(from({ jsonrpc: '2.0', id: 9, error: { code: -1, message: 'bad key sk-live4' } }).message).toEqual({ jsonrpc: '2.0', id: 9, error: { code: -1, message: 'bad key [redacted by policy]' } });
+    expect(from({ jsonrpc: '2.0', method: 'notifications/progress', params: { progress: 1 } })).toEqual({ message: { jsonrpc: '2.0', method: 'notifications/progress', params: { progress: 1 } }, rule: null });
+    expect(from('sk-not-an-object')).toEqual({ message: 'sk-not-an-object', rule: null });
+  });
+
+  it('shapes a batch from the server item by item', () => {
+    const { interceptor, from } = setup();
+    interceptor.fromClient(JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'search', arguments: {} } }));
+    interceptor.fromClient(JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'read', arguments: {} } }));
+    const { message, rule } = from([
+      { jsonrpc: '2.0', id: 1, result: { content: [{ type: 'text', text: 'x'.repeat(400) }] } },
+      { jsonrpc: '2.0', id: 2, result: { content: [{ type: 'text', text: 'sk-live5' }] } },
+      { jsonrpc: '2.0', method: 'notifications/progress', params: {} },
+    ]);
+    expect(rule).toBe('policy: result too large');
+    expect(message).toEqual([
+      { jsonrpc: '2.0', id: 1, result: { content: [{ type: 'text', text: expect.stringContaining('over the limit of 300') }], isError: true } },
+      { jsonrpc: '2.0', id: 2, result: { content: [{ type: 'text', text: '[redacted by policy]' }] } },
+      { jsonrpc: '2.0', method: 'notifications/progress', params: {} },
+    ]);
+  });
+
+  it('leaves messages byte for byte alone when nothing matches or no redact rule is set', () => {
+    for (const results of [null, { maxBytes: 10 }]) {
+      const { interceptor } = setup(results);
+      const line = '{"jsonrpc":"2.0","method":"notifications/message","params":{"data":"sk-live6"}}';
+      expect(interceptor.fromServer(line)).toEqual({ line, rule: null });
+      expect(interceptor.fromServer('[1,{"jsonrpc":"2.0","id":3,"result":{}}]')).toEqual({ line: '[1,{"jsonrpc":"2.0","id":3,"result":{}}]', rule: null });
+    }
+  });
+
+  it('redacts a tool list, and still hides what the policy forbids', () => {
+    const { interceptor, from } = setup();
+    interceptor.fromClient(JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' }));
+    const tools = [{ name: 'search', description: 'uses sk-live7', inputSchema: { type: 'object' } }, { name: 'delete', inputSchema: { type: 'object' } }];
+    expect(from({ jsonrpc: '2.0', id: 1, result: { tools } })).toEqual({
+      message: { jsonrpc: '2.0', id: 1, result: { tools: [{ name: 'search', description: 'uses [redacted by policy]', inputSchema: { type: 'object' } }] } },
+      rule: 'policy: hid delete',
+    });
+  });
+});
+
 describe('stdio proxy with a policy', () => {
   let store: Store;
   beforeEach(() => (store = new Store(':memory:')));

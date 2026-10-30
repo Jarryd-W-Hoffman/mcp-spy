@@ -226,6 +226,12 @@ describe('paths', () => {
     expect(isUnder('./~/x', ['/work'], '/work')).toBe(true);
   });
 
+  it("only judges absolute paths when the server's directory isn't known", () => {
+    expect(isUnder('/work/a', ['/work'], null)).toBe(true);
+    expect(isUnder('file:///work/a', ['/work'], null)).toBe(true);
+    for (const relative of ['a', './a', '../work/a', '~', '~/a', '~root/a']) expect(isUnder(relative, ['/work', homedir()], null)).toBe(false);
+  });
+
   it('accepts a single directory', () => {
     expect(isUnder('/a/b', ['/a'], '/')).toBe(true);
     expect(engine({ rules: [{ tool: 'r', where: { p: { under: '.' } }, allow: true }] }, { base: root }).check('tools/call', call('r', { p: join(root, 'x') })).allow).toBe(true);

@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { createReadStream, existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { chmodSync, createReadStream, existsSync, readFileSync, realpathSync, renameSync, statSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { createInterface } from 'node:readline';
 import { parseArgs } from 'node:util';
@@ -172,7 +172,7 @@ async function run(argv: string[]): Promise<void> {
   const [command, ...args] = argv.slice(separator + 1) as [string, ...string[]];
 
   // Before anything starts: a server must never run without the policy it was given.
-  const policy = values.policy !== undefined ? loadPolicy(values.policy, values.name ?? null) : undefined;
+  const policy = values.policy !== undefined ? loadPolicy(values.policy, values.name ?? null, process.cwd()) : undefined;
   const mocks = values.mocks !== undefined ? loadMocks(values.mocks, values.name ?? null) : undefined;
   const redactor = makeRedactor(values);
   if (values.policy !== undefined) warnIfWritable(resolve(values.policy), process.cwd(), "the server's working directory");
@@ -213,7 +213,8 @@ async function proxyCommand(argv: string[]): Promise<void> {
   if (!isLoopbackHost(values.host)) fail('--host must be a loopback address; recorded traffic can contain secrets');
 
   // Before listening: the agent must never reach the server without the policy it was given.
-  const policy = values.policy !== undefined ? loadPolicy(values.policy, values.name ?? null) : undefined;
+  // A remote server's working directory is unknown, so relative paths can't be checked.
+  const policy = values.policy !== undefined ? loadPolicy(values.policy, values.name ?? null, null) : undefined;
   const mocks = values.mocks !== undefined ? loadMocks(values.mocks, values.name ?? null) : undefined;
   const headers = parseHeaders(values.header);
   const redactor = makeRedactor(values);
@@ -255,9 +256,10 @@ function makeRedactor(values: { redact?: string[]; 'no-redact'?: boolean }): Red
   }
 }
 
-function loadPolicy(path: string, serverName: string | null): PolicyEngine {
+/** `cwd` is the server's working directory, or null when it isn't known (over HTTP). */
+function loadPolicy(path: string, serverName: string | null, cwd: string | null): PolicyEngine {
   try {
-    return new PolicyEngine(resolve(path), serverName, process.cwd(), (message) => process.stderr.write(`[mcpspy] ${message}\n`));
+    return new PolicyEngine(resolve(path), serverName, cwd, (message) => process.stderr.write(`[mcpspy] ${message}\n`));
   } catch (error) {
     fail(`policy ${(error as Error).message}`);
   }
@@ -1104,7 +1106,7 @@ function wrapCommand(argv: string[], mode: 'wrap' | 'unwrap'): void {
 
   // Checked now, not when the agent next starts a server and gets nothing.
   const policy = values.policy !== undefined ? resolve(values.policy) : undefined;
-  if (policy !== undefined) loadPolicy(policy, null);
+  if (policy !== undefined) loadPolicy(policy, null, process.cwd()); // only to validate it
 
   const text = readFileSync(path, 'utf8');
   if (policy !== undefined) warnIfWritable(policy, resolve(path, '..'), "the config's directory, where its servers usually run");
@@ -1140,11 +1142,15 @@ function wrapCommand(argv: string[], mode: 'wrap' | 'unwrap'): void {
   }
 
   // Keep the file's indentation and final newline; write beside it and rename, so
-  // an agent reading the config never sees half of it.
+  // an agent reading the config never sees half of it. The rename lands on the real
+  // file, so a symlinked config (a dotfiles repo) stays a link, and the new file
+  // keeps the old one's mode: configs can hold API keys and be private.
   const indent = /^[ \t]+/m.exec(text)?.[0] ?? '  ';
-  const temporary = `${path}.mcpspy-${process.pid}`;
-  writeFileSync(temporary, JSON.stringify(changed.config, null, indent) + (text.endsWith('\n') ? '\n' : ''));
-  renameSync(temporary, path);
+  const target = realpathSync(path);
+  const temporary = `${target}.mcpspy-${process.pid}`;
+  writeFileSync(temporary, JSON.stringify(changed.config, null, indent) + (text.endsWith('\n') ? '\n' : ''), { mode: 0o600 });
+  chmodSync(temporary, statSync(target).mode & 0o7777);
+  renameSync(temporary, target);
   const servers = `${done.length} ${done.length === 1 ? 'server' : 'servers'}`;
   out(
     mode === 'wrap'
