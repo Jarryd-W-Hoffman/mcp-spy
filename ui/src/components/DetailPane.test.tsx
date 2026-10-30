@@ -117,6 +117,12 @@ describe('DetailPane', () => {
     await screen.findByText('Response');
   });
 
+  it('names the policy rule behind a reply', async () => {
+    stubFetch({ '/api/messages/1': detail(toolRequest, toolRequest, toolResponse) });
+    render(pane({ exchange: exchange(summary(), summary({ id: 2, direction: 'server', kind: 'response', request_id: 1, mock: 'policy: no writes' })) }));
+    expect(screen.getByText('no writes').parentElement!.textContent).toBe('Answered or changed by the policy: no writes');
+  });
+
   it('offers no replay for initialize, and reports a failed load', async () => {
     stubFetch({ '/api/messages/1': new Status(500) });
     render(pane({ exchange: exchange(summary({ method: 'initialize', subject: null })) }));

@@ -12,6 +12,8 @@ export interface WrapOptions {
   command?: string;
   db?: string;
   mocks?: string;
+  /** Policy file (an absolute path: the agent may start servers anywhere). */
+  policy?: string;
 }
 
 export interface WrapChange {
@@ -35,6 +37,7 @@ export function wrapConfig(config: unknown, options: WrapOptions = {}): { config
       name,
       ...(options.db !== undefined ? ['--db', options.db] : []),
       ...(options.mocks !== undefined ? ['--mocks', options.mocks] : []),
+      ...(options.policy !== undefined ? ['--policy', options.policy] : []),
       '--',
       entry.command as string,
       ...stringArgs(entry),

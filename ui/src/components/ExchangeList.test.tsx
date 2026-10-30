@@ -18,6 +18,8 @@ const messages = [
   summary({ id: 8, direction: 'client', kind: 'invalid', method: null, subject: null, rpc_id: null, problem: 'not JSON', preview: '{oops' }),
   summary({ id: 9, session_id: 2, direction: 'server', kind: 'response', method: null, subject: null, rpc_id: '9' }),
   summary({ id: 10, direction: 'server', kind: 'error', method: null, subject: null, rpc_id: '10' }),
+  summary({ id: 11, rpc_id: '11' }),
+  summary({ id: 12, direction: 'server', kind: 'response', method: null, subject: null, request_id: 11, mock: 'policy: no writes' }),
 ];
 
 describe('ExchangeList', () => {
@@ -45,7 +47,9 @@ describe('ExchangeList', () => {
       ['files', '→', 'not JSON {oops', 'invalid', '', '', '100 B'],
       ['#2', '←', 'response id=9', 'unmatched', '', '', '100 B'],
       ['files', '←', 'response id=10', 'error', '', '', '100 B'],
+      ['files', '→', 'tools/call read id=11policy', 'ok', '', '', '200 B'],
     ]);
+    expect(container.querySelector('.badge-policy')!.getAttribute('title')).toBe('Answered or changed by the policy: no writes');
     expect([...container.querySelectorAll('.col-dir')].slice(1, 6).map((td) => td.getAttribute('title'))).toEqual([
       'Agent → server',
       'Agent → server',

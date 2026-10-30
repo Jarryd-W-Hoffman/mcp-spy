@@ -112,7 +112,8 @@ export function formatMessageLine(
   const size = style.dim(formatBytes(message.size));
   const issueCount = message.issues ? (JSON.parse(message.issues) as unknown[]).length : 0;
   const issues = issueCount > 0 ? style.yellow(`⚠ ${issueCount} issue${issueCount === 1 ? '' : 's'}`) : '';
-  const mock = message.mock !== null ? style.magenta(`[mock: ${message.mock}]`) : '';
+  // Policy decisions are labelled "policy: …" already (see proxy/interceptor.ts).
+  const mock = message.mock === null ? '' : style.magenta(message.mock.startsWith('policy: ') ? `[${message.mock}]` : `[mock: ${message.mock}]`);
 
   switch (message.kind) {
     case 'log':
