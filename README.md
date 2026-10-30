@@ -414,6 +414,7 @@ It allows what the session did, not what it should do, so review it before you r
 
 **It fails closed:**
 - **Broken policy:** mcpspy refuses to start the server, and `wrap` refuses to write the config.
+- **Rules that could never match** are broken too. A policy checks what the agent sends, so a rule naming a request only servers send (`sampling/createMessage`, `elicitation/create`, `roots/list`, or a server notification) is refused rather than silently ignored.
 - **Broken edit:** while running, the policy reloads when you save it. A broken edit keeps the old rules in force.
 - **Keep it out of the agent's reach.** The policy reloads when its file changes, so an agent that can write the file can change its own rules. If it sits where the servers work (beside `.mcp.json`, say), make sure no tool it allows can write it, as `write_*` is denied above. Otherwise keep it elsewhere, with absolute `under` paths. mcpspy warns when the file is inside the server's working directory or the config's directory.
 - **What the server sees:** the request exactly as it was checked, re-serialised. JSON with duplicate keys therefore can't show the policy one tool name and the server another.
