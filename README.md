@@ -376,6 +376,24 @@ flowchart LR
 
 A refused tool call gets a tool result with `isError: true` and the reason, so the agent can adjust. Other refused requests get a JSON-RPC error (code `-32001`). Each decision goes to stderr (`[mcpspy] policy denied tools/call write_file (no writes): writes need a human`), and its reply is recorded with the rule that decided it, or `default deny` when no rule matched. In the UI, those rows carry a **policy** badge.
 
+**Start from a recording.** `mcpspy policy suggest` drafts a policy from a session, the latest by default or one chosen with `--session <id>`. The draft denies by default and allows each tool the session called. Where every call passed a path, the draft keeps that argument `under` the deepest directory that held them all:
+
+```sh
+mcpspy policy suggest > policy.json
+```
+
+```json
+{
+  "default": "deny",
+  "rules": [
+    { "name": "read_file (12 recorded calls)", "tool": "read_file", "where": { "path": { "under": "/home/me/app" } }, "allow": true },
+    { "name": "search (3 recorded calls)", "tool": "search", "allow": true }
+  ]
+}
+```
+
+It allows what the session did, not what it should do, so review it before you rely on it.
+
 **It fails closed:**
 - **Broken policy:** mcpspy refuses to start the server, and `wrap` refuses to write the config.
 - **Broken edit:** while running, the policy reloads when you save it. A broken edit keeps the old rules in force.
@@ -430,6 +448,7 @@ Patterns can't catch everything, such as a password in free text with nothing ar
 | `mcpspy prune [--older-than 30d] [--keep <n>] [--max-size 500MB] [--dry-run] [--vacuum]` | Delete old sessions so the log stops growing; `MCPSPY_RETENTION` makes `mcpspy ui` do it daily. |
 | `mcpspy validate [--session <id>]` | List schema and protocol issues; exits 1 if there are errors. |
 | `mcpspy mock serve <file>` / `mcpspy mock add <file> <id>...` | Run a stand-in server from mock rules; turn recorded calls into rules. |
+| `mcpspy policy suggest [--session <id>]` | Draft a policy that allows what a session did (see [Policies](#%EF%B8%8F-policies)). |
 
 Every command takes `--db <path>`. The default log is `~/.mcpspy/mcpspy.db`, or `$MCPSPY_DB` if it's set.
 
@@ -684,6 +703,7 @@ src/
 ├── validate.ts         ← schema checks
 ├── mocks.ts            ← mock rules
 ├── policy.ts           ← policy rules: which calls an agent may make
+├── policy-suggest.ts   ← mcpspy policy suggest
 ├── rpc-client.ts · http-client.ts     ← the minimal clients replay and suites use
 ├── replay.ts · suite.ts · diff.ts
 └── server.ts           ← the UI's API and live stream

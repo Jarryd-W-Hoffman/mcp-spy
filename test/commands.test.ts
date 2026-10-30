@@ -887,6 +887,36 @@ describe('mcpspy prune', () => {
   });
 });
 
+describe('mcpspy policy suggest', () => {
+  it('drafts a policy from the latest or a chosen session', async () => {
+    const { db, sessionId } = await seeded();
+    const latest = await cli(['policy', 'suggest', '--db', db]);
+    expect(latest.code).toBe(0);
+    const policy = JSON.parse(latest.stdout) as { default: string; rules: { tool: string }[] };
+    expect(policy.default).toBe('deny');
+    expect(policy.rules.map((rule) => rule.tool)).toEqual(['echo', 'env', 'roots', 'time']);
+    expect(latest.stderr).toContain(`Allows the 4 tools session #${sessionId} called (4 calls), and denies everything else.`);
+    expect((await cli(['policy', 'suggest', '--session', String(sessionId), '--db', db])).stdout).toBe(latest.stdout);
+  });
+
+  it('counts a single call, and pages through long sessions', async () => {
+    const db = tmpDb();
+    await record(db, [
+      ...Array.from({ length: 600 }, (_, id) => ({ jsonrpc: '2.0', method: 'notifications/progress', params: { progressToken: id } })),
+      { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'echo', arguments: { text: 'hi' } } },
+      { jsonrpc: '2.0', id: 2, method: 'tools/call', params: {} },
+    ]);
+    const result = await cli(['policy', 'suggest', '--db', db]);
+    expect(result.stderr).toContain('Allows the 1 tool session #1 called (1 call)');
+  });
+
+  it('explains bad arguments', async () => {
+    expect((await cli(['policy'])).stderr).toContain('policy takes one subcommand: suggest');
+    expect((await cli(['policy', 'suggest', '--db', tmpDb()])).stderr).toContain('no sessions recorded yet');
+    expect((await cli(['policy', 'suggest', '--session', '9', '--db', tmpDb()])).stderr).toContain('no session with id 9');
+  });
+});
+
 describe('mcpspy wrap and unwrap', () => {
   const config = (text: string) => {
     const path = join(dir(), 'mcp.json');
