@@ -461,3 +461,8 @@ function isCount(value: unknown): value is number {
 function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
+
+/** Whether `file` is inside `directory`, following symlinks in both. */
+export function isInside(file: string, directory: string): boolean {
+  return isUnder(file, [realpathSync(directory)], directory);
+}

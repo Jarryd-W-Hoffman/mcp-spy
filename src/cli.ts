@@ -17,7 +17,7 @@ import {
   type Style,
 } from './format.js';
 import { MockEngine, parseMockFile, rulesFromRecording, type MockFile, type MockTool } from './mocks.js';
-import { PolicyEngine } from './policy.js';
+import { isInside, PolicyEngine } from './policy.js';
 import { suggestPolicy, type RecordedCall } from './policy-suggest.js';
 import { startHttpProxy, type HttpProxy } from './proxy/http.js';
 import { applyPrune, parseAge, parseRetention, parseSize, planPrune, type PruneRules } from './prune.js';
@@ -175,6 +175,7 @@ async function run(argv: string[]): Promise<void> {
   const policy = values.policy !== undefined ? loadPolicy(values.policy, values.name ?? null, process.cwd()) : undefined;
   const mocks = values.mocks !== undefined ? loadMocks(values.mocks, values.name ?? null) : undefined;
   const redactor = makeRedactor(values);
+  if (values.policy !== undefined) warnIfWritable(resolve(values.policy), process.cwd(), "the server's working directory");
   let store: Store;
   try {
     store = new Store(values.db);
@@ -262,6 +263,19 @@ function loadPolicy(path: string, serverName: string | null, cwd: string | null)
   } catch (error) {
     fail(`policy ${(error as Error).message}`);
   }
+}
+
+/**
+ * Warns when a policy file sits where the servers it governs can probably write:
+ * an agent with a file-writing tool could edit its own policy, which mcpspy
+ * reloads when it changes, so it wouldn't be held by it.
+ */
+function warnIfWritable(policy: string, directory: string, where: string): void {
+  if (!isInside(policy, directory)) return;
+  process.stderr.write(
+    `mcpspy: warning: the policy ${policy} is inside ${where}. ` +
+      "An agent that can write files there could change its own policy: make sure no tool the policy allows can write it, or keep it elsewhere (with absolute \"under\" paths).\n",
+  );
 }
 
 function loadMocks(path: string, serverName: string | null): MockEngine {
@@ -1095,6 +1109,7 @@ function wrapCommand(argv: string[], mode: 'wrap' | 'unwrap'): void {
   if (policy !== undefined) loadPolicy(policy, null, process.cwd()); // only to validate it
 
   const text = readFileSync(path, 'utf8');
+  if (policy !== undefined) warnIfWritable(policy, resolve(path, '..'), "the config's directory, where its servers usually run");
   let config: unknown;
   try {
     config = JSON.parse(text);
