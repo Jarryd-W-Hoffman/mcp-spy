@@ -64,6 +64,18 @@ export type Verdict = { allow: true; rule: string | null } | { allow: false; rul
 
 const PERIODS: Record<string, number> = { second: 1_000, minute: 60_000, hour: 3_600_000, day: 86_400_000 };
 const TESTS = ['under', 'in', 'match', 'notMatch', 'max', 'maxLength'];
+/** Methods only a server sends, which no rule could ever see. */
+const SERVER_ONLY = new Set([
+  'sampling/createMessage',
+  'elicitation/create',
+  'roots/list',
+  'notifications/message',
+  'notifications/resources/updated',
+  'notifications/resources/list_changed',
+  'notifications/tools/list_changed',
+  'notifications/prompts/list_changed',
+]);
+
 const RULE_KEYS = ['name', 'tool', 'method', 'server', 'where', 'allow', 'deny', 'ask', 'rate'];
 
 interface CompiledRule {
@@ -135,6 +147,10 @@ function compileRule(raw: unknown, index: number, base: string): CompiledRule {
   }
   if (rule.tool !== undefined && rule.method !== undefined && rule.method !== 'tools/call') {
     throw new Error(`${label}: "tool" only applies to tools/call`);
+  }
+  // Such a rule would never match, and a deny that never fires looks like protection.
+  if (rule.method !== undefined && SERVER_ONLY.has(rule.method)) {
+    throw new Error(`${label}: ${rule.method} is sent by the server, and a policy only checks what the agent sends`);
   }
   if (rule.allow !== undefined && rule.allow !== true) throw new Error(`${label}: "allow" must be true`);
   if (rule.deny !== undefined && (typeof rule.deny !== 'string' || rule.deny === '')) throw new Error(`${label}: "deny" must be a reason`);
