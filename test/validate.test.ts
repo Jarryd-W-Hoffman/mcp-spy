@@ -237,6 +237,15 @@ describe('protocol checks', () => {
     ]);
   });
 
+  it('holds completion requests to the completions capability only from the version that added it', async () => {
+    const answer = (protocolVersion?: string): Sent => ({ from: 'server', kind: 'response', method: 'initialize', body: { result: { protocolVersion, capabilities: {} } } });
+    const complete: Sent = { from: 'client', kind: 'request', method: 'completion/complete' };
+    const issues = async (protocolVersion?: string) => (await run([initialize(), answer(protocolVersion), complete]))[2];
+    expect(await issues('2024-11-05')).toEqual([]);
+    expect(await issues(undefined)).toEqual([]);
+    expect(await issues('2025-03-26')).toEqual([expect.stringContaining('needs the "completions" capability')]);
+  });
+
   it('checks notifications against the capabilities their sender declared', async () => {
     const notify = (from: 'client' | 'server', method: string): Sent => ({ from, kind: 'notification', method });
     const issues = await run([

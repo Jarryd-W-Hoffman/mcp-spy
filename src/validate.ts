@@ -65,6 +65,9 @@ const SERVER_CAPABILITY: [prefix: string, capability: string][] = [
   ['completion/complete', 'completions'],
 ];
 
+/** Capabilities that only exist from a protocol version on; older sessions aren't held to them. */
+const INTRODUCED: Record<string, string> = { completions: '2025-03-26' };
+
 /** The client capability each server request needs. */
 const CLIENT_CAPABILITY: Record<string, string> = {
   'sampling/createMessage': 'sampling',
@@ -92,6 +95,8 @@ export class SessionValidator {
   private tools = new Map<string, ToolSchemas>();
   /** Capabilities each side declared in initialize; null until seen, so sessions joined midway aren't judged. */
   private readonly capabilities: Record<Side, Record<string, unknown> | null> = { client: null, server: null };
+  /** The protocol version the server chose, if it said. */
+  private version: string | null = null;
 
   /**
    * The lifecycle and capability rules: what initialize must return, what
@@ -115,7 +120,9 @@ export class SessionValidator {
     if (declared === null) return [];
     if (kind === 'request') {
       const needed = from === 'client' ? SERVER_CAPABILITY.find(([prefix]) => method.startsWith(prefix))?.[1] : CLIENT_CAPABILITY[method];
-      if (needed !== undefined && !isObject(declared[needed])) {
+      const since = needed !== undefined ? INTRODUCED[needed] : undefined;
+      const applies = since === undefined || (this.version !== null && this.version >= since);
+      if (needed !== undefined && applies && !isObject(declared[needed])) {
         // A client asking is harmless (the server says no); a server asking breaks the client's trust in capabilities.
         const issue = from === 'client' ? warning : error;
         return [issue('method', `${method} needs the "${needed}" capability, which the ${other} didn't declare in initialize`)];
@@ -147,6 +154,8 @@ export class SessionValidator {
       }
     }
     this.capabilities.server = isObject(result.capabilities) ? result.capabilities : {};
+    // Versions are dates, so they compare as strings.
+    this.version = typeof result.protocolVersion === 'string' ? result.protocolVersion : null;
     return issues;
   }
 
