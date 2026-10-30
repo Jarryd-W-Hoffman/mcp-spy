@@ -1,4 +1,4 @@
-import { mkdirSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { DatabaseSync, type StatementSync } from 'node:sqlite';
@@ -90,6 +90,25 @@ CREATE INDEX IF NOT EXISTS messages_missing_tokens ON messages(id)
 
 const SQLITE_BUSY = 5;
 
+/**
+ * The log holds tool arguments, results and server output, so only its owner
+ * may read it. Done before WAL is switched on: SQLite gives the -wal and -shm
+ * files the database's mode. mcpspy's own directory is closed too, but not
+ * the directory of a log kept elsewhere (it could be /tmp). A file someone
+ * else owns can't be changed, and is left as it is.
+ */
+function keepPrivate(path: string): void {
+  const change = (target: string, mode: number) => {
+    try {
+      chmodSync(target, mode);
+    } catch {
+      // Not ours to change.
+    }
+  };
+  for (const file of [path, `${path}-wal`, `${path}-shm`]) if (existsSync(file)) change(file, 0o600);
+  if (dirname(path) === join(homedir(), '.mcpspy')) change(dirname(path), 0o700);
+}
+
 export function defaultDbPath(): string {
   return process.env.MCPSPY_DB ?? join(homedir(), '.mcpspy', 'mcpspy.db');
 }
@@ -119,8 +138,9 @@ export class Store {
   private readonly insertMessageStmt: StatementSync;
 
   constructor(path: string = defaultDbPath()) {
-    if (path !== ':memory:') mkdirSync(dirname(path), { recursive: true });
+    if (path !== ':memory:') mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
     this.db = new DatabaseSync(path);
+    if (path !== ':memory:') keepPrivate(path);
     // The timeout first: switching to WAL needs a lock, and an agent starting several
     // proxies at once means another process may hold it.
     this.db.exec('PRAGMA busy_timeout = 5000; PRAGMA foreign_keys = ON;');

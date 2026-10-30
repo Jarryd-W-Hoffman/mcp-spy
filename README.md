@@ -648,7 +648,9 @@ Recorded traffic often holds secrets: tokens in tool arguments, private document
 
 ## Your log on disk
 
-Everything lives in one SQLite file, `~/.mcpspy/mcpspy.db` (or `--db` / `$MCPSPY_DB`):
+Everything lives in one SQLite file, `~/.mcpspy/mcpspy.db` (or `--db` / `$MCPSPY_DB`). It holds tool arguments, results and server output, so only you can read it: the file (and its `-wal` and `-shm` companions) is `0600` and `~/.mcpspy` is `0700`, tightened each time mcpspy opens the log.
+
+Its tables:
 
 | Table | One row per |
 | --- | --- |
