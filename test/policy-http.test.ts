@@ -1,5 +1,6 @@
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
+import { gzipSync } from 'node:zlib';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { MockEngine } from '../src/mocks.js';
 import { parsePolicy, PolicyEngine, type PolicyFile } from '../src/policy.js';
@@ -153,6 +154,38 @@ describe('HTTP proxy with a policy', () => {
     ]);
   });
 
+  it('holds compressed replies to the policy too, and refuses ones it cannot read', async () => {
+    await up.close();
+    const listing = JSON.stringify({ jsonrpc: '2.0', id: 1, result: { tools } });
+    const secret = JSON.stringify({ jsonrpc: '2.0', id: 2, result: { content: [{ type: 'text', text: 'key sk-live-123' }] } });
+    const server = createServer((req, res) => {
+      let body = '';
+      req.on('data', (chunk) => (body += chunk));
+      req.on('end', () => {
+        const id = (JSON.parse(body) as { id: number }).id;
+        if (id === 3) return res.writeHead(200, { 'content-type': 'application/json', 'content-encoding': 'zstd' }).end('opaque');
+        const reply = id === 1 ? listing : secret;
+        if (req.headers['x-sse']) {
+          res.writeHead(200, { 'content-type': 'text/event-stream', 'content-encoding': 'gzip' });
+          return res.end(gzipSync(`event: message\ndata: ${reply}\n\n`));
+        }
+        res.writeHead(200, { 'content-type': 'application/json', 'content-encoding': 'gzip' }).end(gzipSync(reply));
+      });
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    up = { url: `http://127.0.0.1:${(server.address() as AddressInfo).port}/mcp`, received: [], close: () => new Promise<void>((resolve) => server.close(() => resolve())) };
+    await start({ rules: [{ tool: 'read_file', allow: true }, { tool: 'search', allow: true }], results: { redact: ['sk-live-\\w+'] } });
+
+    for (const sse of [false, true]) {
+      const list = await post({ jsonrpc: '2.0', id: 1, method: 'tools/list' }, sse);
+      expect(((list.reply as Reply).result!.tools as { name: string }[]).map((tool) => tool.name)).toEqual(['read_file', 'search']);
+      expect(text((await post(call(2, 'search'), sse)).reply)).toBe('key [redacted by policy]');
+    }
+    const unreadable = await fetch(proxy.url, { method: 'POST', headers: { 'content-type': 'application/json', 'mcp-session-id': 'S' }, body: JSON.stringify(call(3, 'search')) });
+    expect([unreadable.status, await unreadable.text()]).toEqual([502, "mcpspy's policy can't check a reply compressed with zstd"]);
+    expect(warnings).toContain("policy: refused a reply compressed with zstd, which mcpspy can't read");
+  });
+
   it('passes tool errors and full tool lists through unchanged', async () => {
     await start({ default: 'allow', results: { maxBytes: 1000 } });
     expect((await post({ jsonrpc: '2.0', id: 1, method: 'tools/list' })).reply).toMatchObject({ result: { tools } });
@@ -163,6 +196,44 @@ describe('HTTP proxy with a policy', () => {
   it('refuses ask rules, which need mcpspy run', async () => {
     await start({ rules: [{ tool: 'search', ask: 'Search?' }] });
     expect(text((await post(call(1, 'search'))).reply)).toBe('Blocked by mcpspy policy: needs approval (Search?), but asking only works with mcpspy run');
+  });
+
+  it('redacts every message from the server, batches and stream events included', async () => {
+    await up.close();
+    const server = createServer((req, res) => {
+      let body = '';
+      req.on('data', (chunk) => (body += chunk));
+      req.on('end', () => {
+        const { id } = JSON.parse(body) as { id: number };
+        const json = (reply: unknown) => res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify(reply));
+        if (id === 1) return json({ jsonrpc: '2.0', id, result: { contents: [{ uri: 'file:///.env', text: 'KEY=sk-live1' }] } });
+        if (id === 2) return json([{ jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: 'sk-live2' }] } }, { jsonrpc: '2.0', method: 'notifications/progress', params: {} }, 7]);
+        if (id === 4) return json({ jsonrpc: '2.0', id, result: { tools: [{ name: 'search', description: 'sk-live4', inputSchema: { type: 'object' } }, { name: 'delete', inputSchema: { type: 'object' } }] } });
+        res.writeHead(200, { 'content-type': 'text/event-stream' });
+        res.end(`event: message\ndata: {"jsonrpc":"2.0","method":"notifications/message","params":{"data":"sk-live3"}}\n\nevent: message\ndata: {"jsonrpc":"2.0","id":${id},"result":{}}\n\n`);
+      });
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    up = { url: `http://127.0.0.1:${(server.address() as AddressInfo).port}/mcp`, received: [], close: () => new Promise<void>((resolve) => server.close(() => resolve())) };
+    await start({ default: 'allow', rules: [{ tool: 'delete', deny: 'no' }], results: { redact: ['sk-\\w+'] } });
+
+    const send = async (body: object) => (await fetch(proxy.url, { method: 'POST', headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream', 'mcp-session-id': 'S' }, body: JSON.stringify(body) })).text();
+    expect(JSON.parse(await send({ jsonrpc: '2.0', id: 1, method: 'resources/read', params: { uri: 'file:///.env' } }))).toMatchObject({ result: { contents: [{ text: 'KEY=[redacted by policy]' }] } });
+    expect(JSON.parse(await send(call(2, 'search')))).toEqual([
+      { jsonrpc: '2.0', id: 2, result: { content: [{ type: 'text', text: '[redacted by policy]' }] } },
+      { jsonrpc: '2.0', method: 'notifications/progress', params: {} },
+      7,
+    ]);
+    expect(JSON.parse(await send({ jsonrpc: '2.0', id: 4, method: 'tools/list' }))).toEqual({
+      jsonrpc: '2.0',
+      id: 4,
+      result: { tools: [{ name: 'search', description: '[redacted by policy]', inputSchema: { type: 'object' } }] },
+    });
+    const stream = await send({ jsonrpc: '2.0', id: 3, method: 'ping' });
+    expect(stream).toContain('"data":"[redacted by policy]"');
+    expect(stream).not.toContain('sk-live');
+    // What's recorded is what the agent got.
+    expect(store.messagesAfter(0).filter((message) => message.payload.includes('sk-live'))).toEqual([]);
   });
 
   it('answers refusals without a session header when the agent sent none', async () => {

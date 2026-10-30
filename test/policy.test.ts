@@ -22,6 +22,8 @@ describe('parsePolicy', () => {
     ['{"rules": [{"name": 5, "allow": true}]}', 'rules[0]: "name" must be a string'],
     ['{"rules": [{"name": "r", "tool": 5, "allow": true}]}', 'rule "r": "tool" must be a string'],
     ['{"rules": [{"tool": "x", "method": "resources/read", "allow": true}]}', 'rules[0]: "tool" only applies to tools/call'],
+    ['{"rules": [{"name": "no sampling", "method": "sampling/createMessage", "deny": "no"}]}', 'rule "no sampling": sampling/createMessage is sent by the server, and a policy only checks what the agent sends'],
+    ['{"rules": [{"method": "notifications/tools/list_changed", "deny": "no"}]}', 'rules[0]: notifications/tools/list_changed is sent by the server'],
     ['{"rules": [{"allow": false}]}', 'rules[0]: "allow" must be true'],
     ['{"rules": [{"deny": ""}]}', 'rules[0]: "deny" must be a reason'],
     ['{"rules": [{"deny": 5}]}', 'rules[0]: "deny" must be a reason'],
@@ -224,6 +226,12 @@ describe('paths', () => {
     expect(isUnder('~', [homedir()], '/work')).toBe(true);
     expect(isUnder('~root/x', ['/'], '/')).toBe(false);
     expect(isUnder('./~/x', ['/work'], '/work')).toBe(true);
+  });
+
+  it("only judges absolute paths when the server's directory isn't known", () => {
+    expect(isUnder('/work/a', ['/work'], null)).toBe(true);
+    expect(isUnder('file:///work/a', ['/work'], null)).toBe(true);
+    for (const relative of ['a', './a', '../work/a', '~', '~/a', '~root/a']) expect(isUnder(relative, ['/work', homedir()], null)).toBe(false);
   });
 
   it('accepts a single directory', () => {

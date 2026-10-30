@@ -92,6 +92,18 @@ describe('UI server', () => {
     expect(asset.headers.get('cache-control')).toContain('immutable');
   });
 
+  it('forbids other sites from framing it, on every response', async () => {
+    for (const path of ['/', '/api/sessions', '/api/nope']) {
+      const response = await fetch(ui.url + path);
+      await response.arrayBuffer();
+      expect([response.headers.get('x-frame-options'), response.headers.get('content-security-policy'), response.headers.get('x-content-type-options')]).toEqual([
+        'DENY',
+        "frame-ancestors 'none'",
+        'nosniff',
+      ]);
+    }
+  });
+
   it('refuses requests addressed to a non-loopback host', async () => {
     const { port } = new URL(ui.url);
     const status = await new Promise<number>((resolve, reject) => {
@@ -113,6 +125,43 @@ describe('isLoopbackHost', () => {
     expect(isLoopbackHost('[::1]:7777')).toBe(true);
     expect(isLoopbackHost('localhost.evil.example')).toBe(false);
     expect(isLoopbackHost(undefined)).toBe(false);
+  });
+});
+
+describe('UI server key', () => {
+  it('serves only requests holding the key, given once in the link and kept in a cookie', async () => {
+    const store = new Store(':memory:');
+    const staticDir = mkdtempSync(join(tmpdir(), 'mcpspy-ui-'));
+    writeFileSync(join(staticDir, 'index.html'), '<p>ui</p>');
+    const ui = await startUiServer({ store, port: 0, staticDir, key: 'k3y' });
+    const port = (ui.server.address() as { port: number }).port;
+    try {
+      expect(ui.url).toBe(`http://localhost:${port}/?key=k3y`);
+      const base = `http://localhost:${port}`;
+      const refused = await fetch(`${base}/api/sessions`);
+      expect([refused.status, await refused.text()]).toEqual([401, 'Open the link mcpspy ui printed: it carries the key to this UI.\n']);
+      expect((await fetch(`${base}/`)).status).toBe(401);
+      // A wrong key, a key of another length, or one offered by POST, gets no cookie.
+      for (const [path, method] of [['/?key=k3z', 'GET'], ['/?key=k', 'GET'], ['/api/replay?key=k3y', 'POST']] as const) {
+        const response = await fetch(`${base}${path}`, { method, redirect: 'manual' });
+        expect([response.status, response.headers.get('set-cookie')]).toEqual([401, null]);
+      }
+
+      const entry = await fetch(`${base}/sessions?key=k3y&tab=tools`, { redirect: 'manual' });
+      expect(entry.status).toBe(303);
+      expect(entry.headers.get('location')).toBe('/sessions?tab=tools');
+      expect(entry.headers.get('set-cookie')).toBe(`mcpspy_key_${port}=k3y; Path=/; HttpOnly; SameSite=Strict`);
+      const cookie = `other=1; mcpspy_key_${port}=k3y`;
+      expect((await fetch(`${base}/api/sessions`, { headers: { cookie } })).status).toBe(200);
+      expect(await (await fetch(`${base}/`, { headers: { cookie } })).text()).toBe('<p>ui</p>');
+      // Another UI's cookie (another port) or a wrong value isn't enough.
+      for (const wrong of [`mcpspy_key_${port + 1}=k3y`, `mcpspy_key_${port}=nope`]) {
+        expect((await fetch(`${base}/api/sessions`, { headers: { cookie: wrong } })).status).toBe(401);
+      }
+    } finally {
+      await ui.close();
+      store.close();
+    }
   });
 });
 
