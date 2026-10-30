@@ -379,7 +379,7 @@ flowchart LR
 
 - **Rules** are checked in order, and the first one that matches decides. A rule matches on `tool` (with `*` wildcards), or `method` for anything other than `tools/call`, and on `server` (the `--name`, with wildcards). It may also have a `where` of tests on the arguments (or a request's params), keyed by dot path. It then `allow`s (`true`), `deny`s with a reason the agent sees, or `ask`s with a prompt. When an allow rule's tests fail, the refusal names the argument (`"path" is not allowed for read_file`).
 - **Tests**:
-  - `under` (directories, relative to the policy file): the path must be inside one of them once symlinks are followed, so `src/../../etc` and a link out of `src/` both fail. A relative path in the arguments is resolved against the server's working directory. A leading `~` means the home directory, as servers that expand it read it, and `~user` paths are refused.
+  - `under` (directories, relative to the policy file): the path must be inside one of them once symlinks are followed, so `src/../../etc` and a link out of `src/` both fail. A relative path in the arguments is resolved against the server's working directory. A leading `~` means the home directory, as servers that expand it read it, and `~user` paths are refused. Behind `mcpspy proxy`, the server's working directory and home aren't known, so only absolute paths and `file:` URIs can pass an `under` test.
   - `in`: one of a list of values.
   - `match` and `notMatch`: regular expressions.
   - `max`: for numbers.

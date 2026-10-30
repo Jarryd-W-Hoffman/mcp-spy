@@ -78,7 +78,7 @@ interface CompiledRule {
 }
 
 /** Takes the value and the server's directory, which relative paths are resolved against. */
-type CompiledTest = (value: unknown, cwd: string) => boolean;
+type CompiledTest = (value: unknown, cwd: string | null) => boolean;
 
 export interface CompiledPolicy {
   defaultAllow: boolean;
@@ -222,8 +222,11 @@ export class PolicyEngine {
   constructor(
     private readonly path: string | null,
     private readonly serverName: string | null,
-    /** The server's working directory, which relative paths in arguments are resolved against. */
-    private readonly cwd: string,
+    /**
+     * The server's working directory, which relative paths in arguments are
+     * resolved against; null when it isn't known (a server reached over HTTP).
+     */
+    private readonly cwd: string | null,
     private readonly warn: (message: string) => void = () => {},
     initial?: CompiledPolicy,
     private readonly now: () => number = Date.now,
@@ -384,16 +387,20 @@ export class PolicyEngine {
 /**
  * Whether `value`, a path or file: URI, is inside one of `roots` once
  * symlinks are followed, so a link inside an allowed directory can't reach
- * out of it. Relative paths are resolved against the server's directory.
+ * out of it. Relative paths are resolved against the server's directory; when
+ * that isn't known (`cwd` null, for servers over HTTP), only absolute paths
+ * and file: URIs can be judged, and anything else is refused.
  */
-export function isUnder(value: string, roots: string[], cwd: string): boolean {
+export function isUnder(value: string, roots: string[], cwd: string | null): boolean {
   // Servers commonly expand a leading ~ to the home directory (the reference
-  // filesystem server does), so read it as they would. ~user can't be read here.
-  if (value === '~' || value.startsWith('~/')) value = join(homedir(), value.slice(1));
+  // filesystem server does), so read it as they would. ~user can't be read
+  // here, and nor can a remote server's home.
+  if (cwd !== null && (value === '~' || value.startsWith('~/'))) value = join(homedir(), value.slice(1));
   else if (value.startsWith('~')) return false;
+  if (cwd === null && !value.startsWith('file:') && !isAbsolute(value)) return false;
   let path: string;
   try {
-    path = value.startsWith('file:') ? fileURLToPath(value) : resolve(cwd, value);
+    path = value.startsWith('file:') ? fileURLToPath(value) : resolve(cwd ?? '/', value);
   } catch {
     return false;
   }
