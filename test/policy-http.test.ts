@@ -136,6 +136,44 @@ describe('HTTP proxy with a policy', () => {
     ]);
   });
 
+  it('redacts every message from the server, batches and stream events included', async () => {
+    await up.close();
+    const server = createServer((req, res) => {
+      let body = '';
+      req.on('data', (chunk) => (body += chunk));
+      req.on('end', () => {
+        const { id } = JSON.parse(body) as { id: number };
+        const json = (reply: unknown) => res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify(reply));
+        if (id === 1) return json({ jsonrpc: '2.0', id, result: { contents: [{ uri: 'file:///.env', text: 'KEY=sk-live1' }] } });
+        if (id === 2) return json([{ jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: 'sk-live2' }] } }, { jsonrpc: '2.0', method: 'notifications/progress', params: {} }, 7]);
+        if (id === 4) return json({ jsonrpc: '2.0', id, result: { tools: [{ name: 'search', description: 'sk-live4', inputSchema: { type: 'object' } }, { name: 'delete', inputSchema: { type: 'object' } }] } });
+        res.writeHead(200, { 'content-type': 'text/event-stream' });
+        res.end(`event: message\ndata: {"jsonrpc":"2.0","method":"notifications/message","params":{"data":"sk-live3"}}\n\nevent: message\ndata: {"jsonrpc":"2.0","id":${id},"result":{}}\n\n`);
+      });
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    up = { url: `http://127.0.0.1:${(server.address() as AddressInfo).port}/mcp`, received: [], close: () => new Promise<void>((resolve) => server.close(() => resolve())) };
+    await start({ default: 'allow', rules: [{ tool: 'delete', deny: 'no' }], results: { redact: ['sk-\\w+'] } });
+
+    const send = async (body: object) => (await fetch(proxy.url, { method: 'POST', headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream', 'mcp-session-id': 'S' }, body: JSON.stringify(body) })).text();
+    expect(JSON.parse(await send({ jsonrpc: '2.0', id: 1, method: 'resources/read', params: { uri: 'file:///.env' } }))).toMatchObject({ result: { contents: [{ text: 'KEY=[redacted by policy]' }] } });
+    expect(JSON.parse(await send(call(2, 'search')))).toEqual([
+      { jsonrpc: '2.0', id: 2, result: { content: [{ type: 'text', text: '[redacted by policy]' }] } },
+      { jsonrpc: '2.0', method: 'notifications/progress', params: {} },
+      7,
+    ]);
+    expect(JSON.parse(await send({ jsonrpc: '2.0', id: 4, method: 'tools/list' }))).toEqual({
+      jsonrpc: '2.0',
+      id: 4,
+      result: { tools: [{ name: 'search', description: '[redacted by policy]', inputSchema: { type: 'object' } }] },
+    });
+    const stream = await send({ jsonrpc: '2.0', id: 3, method: 'ping' });
+    expect(stream).toContain('"data":"[redacted by policy]"');
+    expect(stream).not.toContain('sk-live');
+    // What's recorded is what the agent got.
+    expect(store.messagesAfter(0).filter((message) => message.payload.includes('sk-live'))).toEqual([]);
+  });
+
   it('passes tool errors and full tool lists through unchanged', async () => {
     await start({ default: 'allow', results: { maxBytes: 1000 } });
     expect((await post({ jsonrpc: '2.0', id: 1, method: 'tools/list' })).reply).toMatchObject({ result: { tools } });

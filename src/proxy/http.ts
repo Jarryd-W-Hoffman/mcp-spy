@@ -360,21 +360,34 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
   }
 
   /**
-   * A reply as the agent should get it: tool lists with mock tools added and
-   * forbidden ones removed, tool results held to the policy's limits. Null
-   * when nothing changes.
+   * A message from the server as the agent should get it: tool lists with mock
+   * tools added and forbidden ones removed, tool results held to the policy's
+   * limits, anything else redacted. A batch is shaped item by item. Null when
+   * nothing changes.
    */
   function shapeReply(session: Tracked, message: unknown): { text: string; rule: string } | null {
-    if (typeof message !== 'object' || message === null || Array.isArray(message)) return null;
-    const { id, result } = message as { id?: unknown; result?: unknown };
-    const key = JSON.stringify(id);
-    const kind = id === undefined ? undefined : awaitingOf(session).get(key);
-    if (kind === undefined) return null;
-    awaitingOf(session).delete(key);
-    if (result === undefined) return null;
+    const items = Array.isArray(message) ? message : [message];
+    const shaped = items.map((item) => shapeOne(session, item));
+    if (shaped.every((item) => item === null)) return null;
+    const out = shaped.map((item, index) => (item === null ? items[index] : item.message));
+    return { text: JSON.stringify(Array.isArray(message) ? out : out[0]), rule: shaped.find((item) => item !== null)!.rule };
+  }
 
-    let shaped: unknown = result;
-    let rule: string | null = null;
+  function shapeOne(session: Tracked, message: unknown): { message: unknown; rule: string } | null {
+    if (typeof message !== 'object' || message === null || Array.isArray(message)) return null;
+    const record = message as Record<string, unknown>;
+    const redacted = policy?.redactMessage(record) ?? null;
+    const plain = redacted ? { message: redacted, rule: 'policy: redacted' } : null;
+    const { id, result } = record;
+    const key = JSON.stringify(id);
+    const kind = id === undefined || 'method' in record ? undefined : awaitingOf(session).get(key);
+    if (kind === undefined) return plain;
+    awaitingOf(session).delete(key);
+    if (result === undefined) return plain;
+
+    // Tool results get the policy's limits below, which include redaction; lists are redacted first, as on stdio.
+    let shaped: unknown = kind === 'list' && redacted ? redacted.result : result;
+    let rule: string | null = kind === 'list' && redacted ? 'policy: redacted' : null;
     if (kind === 'list' && mocks && mocks.tools.length > 0) {
       shaped = mocks.patchToolList(shaped);
       rule = 'mock tools';
@@ -387,7 +400,7 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
       const limited = policy.limitResult(shaped);
       if (limited.change) [shaped, rule] = [limited.result, `policy: ${limited.change}`];
     }
-    return rule === null ? null : { text: JSON.stringify({ ...message, result: shaped }), rule };
+    return rule === null ? null : { message: { ...record, result: shaped }, rule };
   }
 
   await new Promise<void>((resolve, reject) => {

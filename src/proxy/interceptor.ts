@@ -121,21 +121,36 @@ export class Interceptor {
 
   /** The line to forward to the client, and the rule that shaped it, if any. */
   fromServer(line: string): { line: string; rule: string | null } {
-    const { mocks, policy } = this.options;
-    let message: Message;
+    let message: unknown;
     try {
-      message = JSON.parse(line) as Message;
+      message = JSON.parse(line);
     } catch {
       return { line, rule: null };
     }
-    if (!isObject(message) || message.id === undefined || 'method' in message) return { line, rule: null };
+    // A batch from the server is shaped item by item, so it can't carry anything past the policy.
+    const shaped = Array.isArray(message) ? message.map((item) => this.shape(item)) : [this.shape(message)];
+    const rule = shaped.find((item) => item.rule !== null)?.rule ?? null;
+    if (shaped.every((item, index) => item.message === (Array.isArray(message) ? message[index] : message))) return { line, rule };
+    const out = shaped.map((item) => item.message);
+    return { line: JSON.stringify(Array.isArray(message) ? out : out[0]), rule };
+  }
+
+  /** One message from the server as the agent should get it, and the rule that changed it, if any. */
+  private shape(received: unknown): { message: unknown; rule: string | null } {
+    const { mocks, policy } = this.options;
+    if (!isObject(received)) return { message: received, rule: null };
+    const redacted = policy?.redactMessage(received) ?? null;
+    if (received.id === undefined || 'method' in received) return { message: redacted ?? received, rule: redacted ? 'policy: redacted' : null };
+    let message: Message = received;
 
     const id = JSON.stringify(message.id);
     let rule = this.delayed.get(id) ?? null;
     this.delayed.delete(id);
     const toolList = this.toolLists.delete(id);
     const toolCall = this.toolCalls.delete(id);
-    if (!('result' in message)) return { line, rule };
+    // Tool results get the policy's limits below, which include redaction.
+    if (!toolCall && redacted) [message, rule] = [redacted, 'policy: redacted'];
+    if (!('result' in message)) return { message, rule };
 
     let result = message.result;
     if (toolList && mocks && mocks.tools.length > 0) {
@@ -156,7 +171,7 @@ export class Interceptor {
         rule = `policy: ${limited.change}`;
       }
     }
-    return result === message.result ? { line, rule } : { line: JSON.stringify({ ...message, result }), rule };
+    return { message: result === message.result ? message : { ...message, result }, rule };
   }
 
   private refuse(message: Message & { method: string }, what: string, rule: string, reason: string): void {

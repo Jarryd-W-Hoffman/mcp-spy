@@ -282,7 +282,7 @@ export class PolicyEngine {
     let changed = false;
     let limited = result;
     if (redact.length > 0) {
-      limited = mapStrings(result, (text) => redact.reduce((out, pattern) => out.replace(pattern, '[redacted by policy]'), text));
+      limited = this.redacted(result);
       changed = JSON.stringify(limited) !== JSON.stringify(result);
     }
     if (maxBytes !== null) {
@@ -293,6 +293,32 @@ export class PolicyEngine {
       }
     }
     return { result: limited, change: changed ? 'result redacted' : null };
+  }
+
+  /**
+   * Applies `redact` to any other message from the server: results of other
+   * methods (resources/read, prompts/get, …), its requests (sampling text goes
+   * straight to a model) and notifications (log data). Only result, params and
+   * error are touched, never the envelope, so a broad pattern can't break the
+   * protocol. Null when nothing matched.
+   */
+  redactMessage(message: Record<string, unknown>): Record<string, unknown> | null {
+    this.reload();
+    if (this.policy.redact.length === 0) return null;
+    let changed = false;
+    const out = { ...message };
+    for (const key of ['result', 'params', 'error']) {
+      if (!(key in message)) continue;
+      const mapped = this.redacted(message[key]);
+      if (JSON.stringify(mapped) === JSON.stringify(message[key])) continue;
+      out[key] = mapped;
+      changed = true;
+    }
+    return changed ? out : null;
+  }
+
+  private redacted(value: unknown): unknown {
+    return mapStrings(value, (text) => this.policy.redact.reduce((out, pattern) => out.replace(pattern, '[redacted by policy]'), text));
   }
 
   private mayAllow(tool: string): boolean {
