@@ -28,6 +28,22 @@ describe('Store on a large log', () => {
 
   const session = (name: string) => store.createSession({ name, transport: 'stdio', command: '[]', cwd: '/', pid: null, started_at: 0 });
 
+  it('searches payloads newest first, ignoring case, in raw and JSON-escaped form', () => {
+    const a = session('a');
+    const b = session('b');
+    const ids = [
+      store.insertMessage(message(a, { payload: '{"path":"/ETC/passwd"}' })),
+      store.insertMessage(message(b, { payload: '{"text":"say \\"hi\\""}' })),
+      store.insertMessage(message(b, { payload: '{"path":"/etc/passwd"}' })),
+      store.insertMessage(message(a, { payload: '{"other":1}' })),
+    ];
+    expect(store.searchMessages('etc/PASSWD').map((m) => m.id)).toEqual([ids[2], ids[0]]);
+    expect(store.searchMessages('passwd', { sessionId: a }).map((m) => m.id)).toEqual([ids[0]]);
+    expect(store.searchMessages('passwd', { limit: 1 }).map((m) => m.id)).toEqual([ids[2]]);
+    expect(store.searchMessages('say "hi"').map((m) => m.id)).toEqual([ids[1]]);
+    expect(store.searchMessages('absent')).toEqual([]);
+  });
+
   // The UI lists sessions every 250 ms, so the counts are kept up to date rather than counted.
   it('keeps each session’s message count as messages arrive and go', () => {
     const a = session('a');

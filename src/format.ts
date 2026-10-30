@@ -140,6 +140,32 @@ function arrow(message: MessageRow, style: Style): string {
   return message.direction === 'client' ? style.dim('→') : style.dim('←');
 }
 
+/**
+ * The part of a payload around the first match of `text` (ignoring ASCII
+ * case, as the search does), on one line, with the match highlighted.
+ */
+export function matchSnippet(payload: string, text: string, style: Style, context = 50): string {
+  const oneLine = payload.replace(/\s+/g, ' ');
+  const lower = oneLine.toLowerCase();
+  let at = -1;
+  let length = 0;
+  for (const form of [text, JSON.stringify(text).slice(1, -1)]) {
+    const found = lower.indexOf(form.replace(/\s+/g, ' ').toLowerCase());
+    if (found !== -1) {
+      [at, length] = [found, form.replace(/\s+/g, ' ').length];
+      break;
+    }
+  }
+  if (at === -1) return style.dim(truncate(oneLine, context * 2));
+  const start = Math.max(0, at - context);
+  const end = Math.min(oneLine.length, at + length + context);
+  return (
+    style.dim(`${start > 0 ? '…' : ''}${oneLine.slice(start, at)}`) +
+    style.yellow(oneLine.slice(at, at + length)) +
+    style.dim(`${oneLine.slice(at + length, end)}${end < oneLine.length ? '…' : ''}`)
+  );
+}
+
 /** Pretty-prints a stored payload, falling back to the raw text. */
 export function prettyPayload(payload: string): string {
   try {

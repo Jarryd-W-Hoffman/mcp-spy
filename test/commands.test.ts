@@ -490,6 +490,41 @@ describe('mcpspy sessions', () => {
   });
 });
 
+describe('mcpspy search', () => {
+  it('lists matching messages oldest first, with the match in context', async () => {
+    const { db } = await seeded();
+    const result = await cli(['search', 'ECHO', '--db', db]);
+    expect(result.code).toBe(0);
+    const lines = result.stdout.trimEnd().split('\n');
+    expect(lines.length).toBeGreaterThan(2);
+    // Server stderr is searched too.
+    expect(lines[0]).toMatch(/#\d+ stderr echo-server/);
+    expect(lines).toContainEqual(expect.stringMatching(/#\d+ → tools\/call echo/));
+    expect(lines[1]).toMatch(/^ {4}.*echo/i);
+    const ids = lines.filter((_, i) => i % 2 === 0).map((line) => Number(/#(\d+)/.exec(line)![1]));
+    expect(ids).toEqual([...ids].sort((x, y) => x - y));
+    expect(result.stderr).toBe('');
+  });
+
+  it('limits, filters by session, and writes JSON', async () => {
+    const { db, sessionId } = await seeded();
+    const limited = await cli(['search', 'echo', '-n', '1', '--session', String(sessionId), '--json', '--db', db]);
+    const rows = limited.stdout.trimEnd().split('\n').map((row) => JSON.parse(row) as { session_id: number });
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.session_id).toBe(sessionId);
+    expect(limited.stderr).toContain('Showing the newest 1 matches');
+  });
+
+  it('exits 1 when nothing matches, and explains bad arguments', async () => {
+    const { db } = await seeded();
+    const none = await cli(['search', 'no', 'such', 'text', '--db', db]);
+    expect([none.code, none.stdout, none.stderr]).toEqual([1, '', 'No recorded messages contain "no such text".\n']);
+    expect((await cli(['search', ' ', '--db', db])).stderr).toContain('search needs some text to look for');
+    expect((await cli(['search', 'x', '-n', '0', '--db', db])).stderr).toContain('-n must be a positive number');
+    expect((await cli(['search', 'x', '--session', 'abc', '--db', db])).stderr).toContain('--session must be a number');
+  });
+});
+
 describe('mcpspy show', () => {
   it('shows a request with its response, from either side', async () => {
     const { db, echo } = await seeded();

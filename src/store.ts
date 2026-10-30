@@ -357,6 +357,26 @@ export class Store {
       .all(afterId, limit) as unknown as MessageRow[];
   }
 
+  /**
+   * Messages whose payload contains `text`, ignoring ASCII case, newest first.
+   * Payloads are stored as JSON, so the text is also looked for as it appears
+   * inside a JSON string (with quotes and backslashes escaped). A full scan:
+   * the SQLite in Node 22 has no FTS5, and a local log is small enough.
+   */
+  searchMessages(text: string, options: { sessionId?: number; limit?: number } = {}): MessageRow[] {
+    const escaped = JSON.stringify(text).slice(1, -1);
+    const matches = 'instr(lower(payload), lower(?)) > 0 OR instr(lower(payload), lower(?)) > 0';
+    const limit = options.limit ?? 50;
+    if (options.sessionId !== undefined) {
+      return this.db
+        .prepare(`SELECT * FROM messages WHERE session_id = ? AND (${matches}) ORDER BY id DESC LIMIT ?`)
+        .all(options.sessionId, text, escaped, limit) as unknown as MessageRow[];
+    }
+    return this.db
+      .prepare(`SELECT * FROM messages WHERE ${matches} ORDER BY id DESC LIMIT ?`)
+      .all(text, escaped, limit) as unknown as MessageRow[];
+  }
+
   /** The id of the message `count` back from the newest, for "tail -n" style starts. */
   idBeforeLast(count: number, sessionId?: number): number {
     const row = (
