@@ -95,7 +95,7 @@ claude mcp add --transport http example http://127.0.0.1:7800/mcp
 **Then watch** while you use the agent as usual:
 
 ```sh
-mcpspy ui --open      # the web inspector, at http://localhost:7777
+mcpspy ui --open      # the web inspector, at the http://localhost:7777/?key=… link it prints
 mcpspy tail -f        # or follow along in the terminal
 ```
 
@@ -640,6 +640,8 @@ Images are costed by their pixel dimensions (read from the PNG, GIF, JPEG or Web
 Recorded traffic often holds secrets: tokens in tool arguments, private documents in results. So:
 
 - **Only localhost.** The UI and the HTTP proxy bind to `127.0.0.1` and refuse requests whose `Host` isn't a loopback name, which stops DNS-rebinding attacks from a web page. The proxy also refuses a non-local `Origin`.
+- **A key per run.** Loopback is shared by every user on the machine, so `mcpspy ui` makes a random key each time it starts and prints a link carrying it. Opening the link swaps the key for an `HttpOnly`, `SameSite=Strict` cookie and drops it from the address bar. Without the cookie, every request gets `401`, so another user can't read your log through the UI or replay calls as you.
+- **The HTTP proxy is for anyone on this machine.** `mcpspy proxy` can't tell which local user is talking to it, so on a shared machine any of them can use it, and the `-H` headers it adds. Use `-H` tokens there only if they'd be fine in those users' hands.
 - **Replay can't be triggered cross-site.** Replay starts processes, so its endpoint also requires a custom header and a JSON body. A cross-site request can't send those without a CORS preflight, and mcpspy never approves one. It also checks `Origin` and `Sec-Fetch-Site`. `mcpspy ui --read-only` turns replay off entirely.
 - **Secrets are removed before they're stored.** Well-known credential formats and the values of secret-sounding keys are replaced with `[REDACTED]` in everything recorded. See [Secrets](#-secrets).
 - **Names, not values.** For stdio servers, mcpspy stores the names of environment variables (so replay can say which are missing), never their values. Over HTTP, headers are never stored at all.
@@ -817,7 +819,8 @@ npm run build         # dist/ (CLI) and dist/ui (web UI)
 npm run dev -- tail   # run the CLI from source via tsx
 npm run bench         # overhead against a real MCP server (Linux; build first)
 
-# The UI with hot reload: the API on :7777, Vite on :5173 proxying /api to it
+# The UI with hot reload: the API on :7777, Vite on :5173 proxying /api to it.
+# Open the link `ui` prints once, so the browser holds its key, then use :5173.
 npm run dev -- ui
 npm run dev:ui
 ```

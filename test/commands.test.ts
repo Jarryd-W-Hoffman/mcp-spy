@@ -1047,7 +1047,11 @@ describe('mcpspy ui', () => {
     const url = /mcpspy UI on (\S+)/.exec(result.stdout)![1]!;
     expect(result.stdout).toContain(`(log: ${db})`);
     expect(result.stdout).toContain('Web UI assets not found');
-    expect((await fetch(`${url}/api/sessions`)).status).toBe(200);
+    // The printed link carries a key, swapped for a cookie; nothing is served without it.
+    expect((await fetch(new URL('/api/sessions', url))).status).toBe(401);
+    const entry = await fetch(url, { redirect: 'manual' });
+    const cookie = entry.headers.get('set-cookie')!.split(';')[0]!;
+    expect((await fetch(new URL('/api/sessions', url), { headers: { cookie } })).status).toBe(200);
     const exited = new Promise<number>((resolve) => vi.spyOn(process, 'exit').mockImplementation(((code: number) => resolve(code)) as never));
     result.signals.get('SIGINT')!();
     expect(await exited).toBe(0);

@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
 import { createReadStream, existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { createInterface } from 'node:readline';
@@ -1195,7 +1196,7 @@ async function ui(argv: string[]): Promise<void> {
   const store = new Store(values.db);
   retainByEnvironment(store);
   const staticDir = resolveUiDir();
-  const server = await startUiServer({ store, port: parseId(values.port, '--port'), staticDir, readOnly: values['read-only'] }).catch((error: NodeJS.ErrnoException) => {
+  const server = await startUiServer({ store, port: parseId(values.port, '--port'), staticDir, readOnly: values['read-only'], key: randomBytes(24).toString('base64url') }).catch((error: NodeJS.ErrnoException) => {
     if (error.code === 'EADDRINUSE') fail(`port ${values.port} is in use; pick another with --port`);
     throw error;
   });
