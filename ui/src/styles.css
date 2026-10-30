@@ -1117,6 +1117,13 @@ table.stats .num {
   background: var(--accent-soft);
 }
 
+/* Replies the policy wrote or changed */
+.badge-policy {
+  margin-left: 6px;
+  color: var(--warn);
+  background: var(--warn-soft);
+}
+
 .detail-mock {
   margin: 10px 0 0;
   font-size: 12px;

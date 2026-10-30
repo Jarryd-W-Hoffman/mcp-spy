@@ -38,6 +38,7 @@ MCP traffic is invisible. The agent says "the tool failed", or quietly picks the
 - **Know what it costs.** Every tool definition a server advertises is sent to the model on every turn. mcpspy shows how many tokens each tool and each result adds, and what changed since the server's last session.
 - **Reproduce without re-prompting.** Replay any recorded call against a fresh server, edit its arguments, run it 20 times for a latency spread, or save it in a regression suite that runs in CI.
 - **Catch protocol bugs early.** Arguments and results are checked against the schemas the server itself declared, as they pass through.
+- **Decide what an agent may do.** A policy allows or refuses each call, with tests on its arguments (paths stay inside a folder, values match a pattern), rate limits, and limits on what results the agent sees.
 - **Fake what isn't there.** Answer calls from mock rules (outages, rate limits, slow responses, bad payloads) to see how an agent copes, or stand in for a server that doesn't exist yet.
 - **Nothing leaves your machine, and secrets stay out of the log.** The log is a SQLite file in your home folder. The UI and proxy only listen on localhost. Tokens and passwords in the traffic are replaced with `[REDACTED]` before they're stored. Environment variable values and HTTP headers such as `Authorization` are never recorded.
 
@@ -319,6 +320,53 @@ Mocked responses are recorded like real ones, and labelled with the rule that pr
     <img src="docs/mocks.png" alt="A mocked get-forecast call: the detail pane says which rule answered it, and mock badges mark the other mocked rows." width="900">
 </p>
 
+### 🛡️ Policies
+
+A policy decides which calls an agent may make. mcpspy checks each request before it reaches the server: refused ones are answered by mcpspy and never arrive.
+
+```json
+{
+  "default": "deny",
+  "rules": [
+    { "name": "no writes", "tool": "write_*", "deny": "writes need a human" },
+    { "tool": "read_file", "where": { "path": { "under": ["./src", "./docs"] } }, "allow": true },
+    { "tool": "query", "where": { "sql": { "match": "^select ", "notMatch": ";" }, "limit": { "max": 500 } }, "allow": true },
+    { "tool": "search", "rate": "20/minute", "allow": true },
+    { "method": "resources/read", "where": { "uri": { "match": "^secret:" } }, "deny": "secret resources are off limits" }
+  ],
+  "results": { "maxBytes": 200000, "redact": ["ghp_[A-Za-z0-9]{36}"] }
+}
+```
+
+```sh
+mcpspy run --name files --policy policy.json -- npx -y @modelcontextprotocol/server-filesystem .
+mcpspy wrap --policy policy.json      # every wrapped server gets it
+```
+
+- **Rules** are checked in order, and the first one that matches decides. A rule matches on `tool` (with `*` wildcards), or `method` for anything other than `tools/call`, and on `server` (the `--name`, with wildcards). It may also have a `where` of tests on the arguments (or a request's params), keyed by dot path. It then either `allow`s (`true`) or `deny`s, giving a reason the agent sees. When an allow rule's tests fail, the refusal names the argument (`"path" is not allowed for read_file`).
+- **Tests**:
+  - `under` (directories, relative to the policy file): the path must be inside one of them once symlinks are followed, so `src/../../etc` and a link out of `src/` both fail. A relative path in the arguments is resolved against the server's working directory.
+  - `in`: one of a list of values.
+  - `match` and `notMatch`: regular expressions.
+  - `max`: for numbers.
+  - `maxLength`: for strings.
+
+  A missing argument fails every test.
+- **Default**: a tool call no rule matches is denied, unless the file says `"default": "allow"`. Other methods, such as `initialize` and `tools/list`, pass unless a rule names them.
+- **Rates**: `rate` on an allow rule (`"10/minute"`, per `second`, `minute`, `hour` or `day`) refuses calls beyond the limit, over a sliding window.
+- **Tool lists** lose the tools no call could be allowed to use, so the agent doesn't plan around them. A tool that some arguments could unlock stays listed.
+- **Results**: `maxBytes` replaces an oversized tool result with an error, and `redact` replaces matches in what the agent receives. This is unlike [Secrets](#-secrets), which only changes the record.
+
+A refused tool call gets a tool result with `isError: true` and the reason, so the agent can adjust. Other refused requests get a JSON-RPC error (code `-32001`). Each decision goes to stderr (`[mcpspy] policy denied tools/call write_file (no writes): writes need a human`), and its reply is recorded with the rule that decided it. In the UI, those rows carry a **policy** badge.
+
+**It fails closed:**
+- **Broken policy:** mcpspy refuses to start the server, and `wrap` refuses to write the config.
+- **Broken edit:** while running, the policy reloads when you save it. A broken edit keeps the old rules in force.
+- **What the server sees:** the request exactly as it was checked, re-serialised. JSON with duplicate keys therefore can't show the policy one tool name and the server another.
+- **Batches and invalid lines:** batched requests, and lines from the agent that aren't JSON, are refused.
+
+Policies apply to `mcpspy run` (stdio servers) for now. `mcpspy proxy` doesn't take `--policy` yet.
+
 ### 🔒 Secrets
 
 mcpspy removes secrets from what it records, before anything reaches the log. The agent and server still exchange the real values, because only the record changes.
@@ -340,9 +388,9 @@ Patterns can't catch everything, such as a password in free text with nothing ar
 
 | Command | What it does |
 | --- | --- |
-| `mcpspy wrap [<config>] [--only <name>] [--dry-run] [--command <path>]` | Put mcpspy in front of the stdio servers in an MCP config (`.mcp.json` by default). |
+| `mcpspy wrap [<config>] [--only <name>] [--dry-run] [--command <path>] [--policy <file>]` | Put mcpspy in front of the stdio servers in an MCP config (`.mcp.json` by default). |
 | `mcpspy unwrap [<config>] [--only <name>] [--dry-run]` | Take it out again, restoring each server's command and args. |
-| `mcpspy run [--name <label>] [--mocks <file>] [--redact <regex>] [--no-redact] -- <cmd> [args…]` | Start a stdio server behind the proxy. `mcpspy -- <cmd>` is shorthand. |
+| `mcpspy run [--name <label>] [--policy <file>] [--mocks <file>] [--redact <regex>] [--no-redact] -- <cmd> [args…]` | Start a stdio server behind the proxy. `--policy` decides which calls the agent may make. `mcpspy -- <cmd>` is shorthand. |
 | `mcpspy proxy <url> [--port 7800] [--name <label>] [--mocks <file>] [-H 'Name: value']` | Proxy a server reached over HTTP (Streamable HTTP or HTTP+SSE). `-H` adds a header, such as a token, to every request. Takes `--redact` and `--no-redact` like `run`. |
 | `mcpspy ui [--port 7777] [--open] [--read-only]` | Serve the web inspector on localhost. `--read-only` turns replay off. |
 | `mcpspy tail [-f] [-n 50] [--session <id>] [--json]` | Print recorded messages; `-f` follows new ones, `--json` prints NDJSON rows. |
@@ -582,6 +630,7 @@ src/
 ├── cli.ts              ← every command
 ├── proxy/
 │   ├── stdio.ts        ← mcpspy run
+│   ├── interceptor.ts  ← policy and mock rules applied to stdio traffic
 │   ├── http.ts         ← mcpspy proxy (Streamable HTTP and HTTP+SSE)
 │   └── mock-server.ts  ← mcpspy mock serve
 ├── framing.ts · sse.ts · jsonrpc.ts   ← bytes → frames → classified messages
@@ -590,6 +639,7 @@ src/
 ├── tokens.ts · exact.ts · report.ts   ← context cost
 ├── validate.ts         ← schema checks
 ├── mocks.ts            ← mock rules
+├── policy.ts           ← policy rules: which calls an agent may make
 ├── rpc-client.ts · http-client.ts     ← the minimal clients replay and suites use
 ├── replay.ts · suite.ts · diff.ts
 └── server.ts           ← the UI's API and live stream
@@ -651,6 +701,7 @@ Numbers vary from run to run and machine to machine; a laptop's clock speed alon
 - **Replays from the UI can't send headers.** HTTP servers that need `Authorization` fail there with a 401 and a hint; use `mcpspy replay -H` instead.
 - **Mock rules apply to single requests.** Batched requests always go to the real server.
 - **Very large results are slower to pass through.** A 5 MB result takes a few hundred milliseconds longer, mostly to scan it for secrets. See [Performance](#performance).
+- **Policies are for stdio servers, and test values, not meaning.** `mcpspy proxy` doesn't enforce one yet. A pattern such as `^select ` narrows what a query tool receives, but it isn't a SQL parser. For a hard guarantee, give the server credentials that can only read.
 - **Token estimates are estimates.** Use them to compare sizes, or `--exact` for real numbers.
 - **One log per machine by default.** Sessions from every project share `~/.mcpspy/mcpspy.db`; use `--db` or `MCPSPY_DB` to keep a project's traffic apart.
 

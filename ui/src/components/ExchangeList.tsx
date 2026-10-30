@@ -104,11 +104,16 @@ function Row({
       <td className="col-message">
         <div className="message-cell">
           <MessageLabel exchange={exchange} />
-          {exchange.response?.mock && (
-            <span className="badge badge-mock" title={`Answered by mock rule "${exchange.response.mock}"`}>
-              mock
-            </span>
-          )}
+          {exchange.response?.mock &&
+            (isPolicy(exchange.response.mock) ? (
+              <span className="badge badge-policy" title={`Answered or changed by the ${exchange.response.mock}`}>
+                policy
+              </span>
+            ) : (
+              <span className="badge badge-mock" title={`Answered by mock rule "${exchange.response.mock}"`}>
+                mock
+              </span>
+            ))}
           {exchange.issues.length > 0 && (
             <span className="badge badge-issue" title={exchange.issues.map((issue) => `${issue.path}: ${issue.message}`).join('\n')}>
               ⚠ {exchange.issues.length}
@@ -160,6 +165,11 @@ function StatusBadge({ exchange: { primary, response, status } }: { exchange: Ex
     case 'none':
       return primary.kind === 'notification' ? <span className="badge badge-quiet">notify</span> : null;
   }
+}
+
+/** Replies the policy wrote or changed are labelled "policy: …" (see src/proxy/interceptor.ts). */
+export function isPolicy(rule: string): boolean {
+  return rule.startsWith('policy: ');
 }
 
 function directionLabel(direction: string): string {

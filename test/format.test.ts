@@ -77,9 +77,11 @@ describe('formatMessageLine', () => {
     expect(formatMessageLine(bad, session, 'search', plain)).toBe('09:05:07.042 github     #5 → tools/call search ⚠ 1 issue id=3 120B');
   });
 
-  it('labels mocked responses', () => {
+  it('labels mocked responses and policy decisions', () => {
     const mocked = row({ direction: 'server', kind: 'response', request_id: 1, latency_ms: 2, mock: 'rate limit' });
     expect(formatMessageLine(mocked, session, 'search', plain)).toContain('[mock: rate limit]');
+    const decided = row({ direction: 'server', kind: 'response', request_id: 1, latency_ms: 2, mock: 'policy: no writes' });
+    expect(formatMessageLine(decided, session, 'search', plain)).toContain('[policy: no writes]');
   });
 
   it('formats stderr lines', () => {

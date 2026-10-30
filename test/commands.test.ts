@@ -1,6 +1,7 @@
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, utimesSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
+import { PassThrough } from 'node:stream';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -176,6 +177,40 @@ describe('mcpspy run', () => {
       const payloads = store.messagesAfter(0).map((message) => message.payload).join('\n');
       expect(payloads).not.toContain('hunter2');
     });
+  });
+
+  it('holds the server to a policy, and refuses to start it with a broken one', async () => {
+    const folder = dir();
+    const policy = join(folder, 'policy.json');
+    writeFileSync(policy, JSON.stringify({ rules: [{ tool: 'echo', allow: true }] }));
+    const db = tmpDb();
+    const result = await cli(['run', '--db', db, '--name', 'echo', '--policy', policy, '--', process.execPath, echoServer], {
+      stdin: [initialize, ...['echo', 'env'].map((name, index) => ({ jsonrpc: '2.0', id: index + 1, method: 'tools/call', params: { name, arguments: { text: 'hi' } } }))].map(line).join(''),
+    });
+    expect(result.code).toBe(0);
+    expect(result.stdout).toContain('"text":"hi"');
+    expect(result.stdout).toContain('Blocked by mcpspy policy: no rule allows env');
+    expect(result.stderr).toContain('[mcpspy] policy denied tools/call env (default): no rule allows env');
+
+    writeFileSync(policy, '{"rules": [{"tool": "echo"}]}');
+    const marker = join(folder, 'started');
+    const broken = await cli(['run', '--db', db, '--policy', policy, '--', process.execPath, '-e', `require('fs').writeFileSync(${JSON.stringify(marker)}, '')`]);
+    expect(broken.code).toBe(2);
+    expect(broken.stderr).toContain(`mcpspy: policy ${policy}: rules[0] needs exactly one of "allow": true or "deny": "<reason>"`);
+    expect(existsSync(marker)).toBe(false);
+  });
+
+  it('reloads an edited policy, saying so', async () => {
+    const policy = join(dir(), 'policy.json');
+    writeFileSync(policy, '{"default": "deny"}');
+    utimesSync(policy, 1000, 1000);
+    const stdin = new PassThrough();
+    const running = cli(['run', '--db', tmpDb(), '--policy', policy, '--', process.execPath, echoServer], { stdin });
+    writeFileSync(policy, '{"default": "allow"}');
+    stdin.end([initialize, { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'echo', arguments: { text: 'now allowed' } } }].map(line).join(''));
+    const result = await running;
+    expect(result.stderr).toContain(`[mcpspy] reloaded policy from ${policy}`);
+    expect(result.stdout).toContain('now allowed');
   });
 
   it('passes on the server exit code', async () => {
@@ -844,6 +879,25 @@ describe('mcpspy wrap and unwrap', () => {
     expect(text.endsWith('}')).toBe(true);
     const unwrapped = await cli(['unwrap', path, '--only', 'a']);
     expect(unwrapped.stdout).toContain('Unwrapped 1 server in');
+  });
+
+  it('adds a checked policy, by absolute path', async () => {
+    const path = config('{"mcpServers":{"a":{"command":"node","args":["a.js"]}}}');
+    const folder = dir();
+    writeFileSync(join(folder, 'policy.json'), '{"default": "allow"}');
+    const cwd = process.cwd();
+    process.chdir(folder);
+    try {
+      expect((await cli(['wrap', path, '--policy', 'policy.json'])).code).toBe(0);
+      writeFileSync(join(folder, 'broken.json'), '{"default": "never"}');
+      const broken = await cli(['wrap', path, '--policy', 'broken.json']);
+      expect(broken.code).toBe(2);
+      expect(broken.stderr).toContain('broken.json: "default" must be "allow" or "deny"');
+    } finally {
+      process.chdir(cwd);
+    }
+    const args = (JSON.parse(readFileSync(path, 'utf8')) as { mcpServers: { a: { args: string[] } } }).mcpServers.a.args;
+    expect(args).toEqual(['run', '--name', 'a', '--policy', join(realpathSync(folder), 'policy.json'), '--', 'node', 'a.js']);
   });
 
   it('wraps several servers and says when there is nothing to do', async () => {

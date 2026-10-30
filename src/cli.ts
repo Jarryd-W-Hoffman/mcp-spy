@@ -15,6 +15,7 @@ import {
   type Style,
 } from './format.js';
 import { MockEngine, parseMockFile, rulesFromRecording, type MockFile, type MockTool } from './mocks.js';
+import { PolicyEngine } from './policy.js';
 import { startHttpProxy, type HttpProxy } from './proxy/http.js';
 import { applyPrune, parseAge, parseRetention, parseSize, planPrune, type PruneRules } from './prune.js';
 import { compilePatterns, Redactor } from './redact.js';
@@ -35,7 +36,7 @@ import { unwrapConfig, wrapConfig, type WrapChange } from './wrap.js';
 const HELP = `mcpspy - see what your AI agent and its MCP servers say to each other
 
 Usage:
-  mcpspy run [--name <label>] [--mocks <file>] [--redact <regex>]... [--no-redact] [--db <path>] -- <command> [args...]
+  mcpspy run [--name <label>] [--policy <file>] [--mocks <file>] [--redact <regex>]... [--no-redact] [--db <path>] -- <command> [args...]
   mcpspy -- <command> [args...]            shorthand for run
   mcpspy proxy <url> [--port <7800>] [--name <label>] [--mocks <file>] [-H 'Name: value']...
                                            [--redact <regex>]... [--no-redact]
@@ -52,7 +53,7 @@ Usage:
   mcpspy validate [--session <id>] [--db <path>]
   mcpspy mock serve <file> [--name <label>]  a fake MCP server driven by mock rules
   mcpspy mock add <file> <message-id>...     turn recorded calls into mock rules
-  mcpspy wrap [<config>] [--only <name>]... [--dry-run] [--command <path>] [--db <path>] [--mocks <file>]
+  mcpspy wrap [<config>] [--only <name>]... [--dry-run] [--command <path>] [--db <path>] [--mocks <file>] [--policy <file>]
   mcpspy unwrap [<config>] [--only <name>]... [--dry-run]
   mcpspy prune [--older-than <30d>] [--keep <n>] [--max-size <500MB>] [--dry-run] [--vacuum] [--db <path>]
 
@@ -150,10 +151,12 @@ async function run(argv: string[]): Promise<void> {
 
   const { values } = parseArgs({
     args: argv.slice(0, separator),
-    options: { name: { type: 'string' }, mocks: { type: 'string' }, db: { type: 'string' }, ...REDACT_OPTIONS },
+    options: { name: { type: 'string' }, mocks: { type: 'string' }, policy: { type: 'string' }, db: { type: 'string' }, ...REDACT_OPTIONS },
   });
   const [command, ...args] = argv.slice(separator + 1) as [string, ...string[]];
 
+  // Before anything starts: a server must never run without the policy it was given.
+  const policy = values.policy !== undefined ? loadPolicy(values.policy, values.name ?? null) : undefined;
   const mocks = values.mocks !== undefined ? loadMocks(values.mocks, values.name ?? null) : undefined;
   const redactor = makeRedactor(values);
   let store: Store;
@@ -164,7 +167,7 @@ async function run(argv: string[]): Promise<void> {
     process.stderr.write(`[mcpspy] can't open the log at ${values.db ?? defaultDbPath()} (${(error as Error).message}); proxying without recording\n`);
     store = new Store(':memory:');
   }
-  const { exitCode } = await runStdioProxy({ command, args, store, name: values.name ?? null, mocks, redactor });
+  const { exitCode } = await runStdioProxy({ command, args, store, name: values.name ?? null, mocks, policy, redactor });
   store.close();
 
   // stdin may still be open (the agent closed nothing); don't let it hold us up.
@@ -229,6 +232,14 @@ function makeRedactor(values: { redact?: string[]; 'no-redact'?: boolean }): Red
     return new Redactor({ builtIn: !values['no-redact'], patterns: compilePatterns(values.redact ?? []) });
   } catch (error) {
     fail((error as Error).message);
+  }
+}
+
+function loadPolicy(path: string, serverName: string | null): PolicyEngine {
+  try {
+    return new PolicyEngine(resolve(path), serverName, process.cwd(), (message) => process.stderr.write(`[mcpspy] ${message}\n`));
+  } catch (error) {
+    fail(`policy ${(error as Error).message}`);
   }
 }
 
@@ -941,12 +952,16 @@ function wrapCommand(argv: string[], mode: 'wrap' | 'unwrap'): void {
     options: {
       only: { type: 'string', multiple: true },
       'dry-run': { type: 'boolean' },
-      ...(mode === 'wrap' ? { command: { type: 'string' }, db: { type: 'string' }, mocks: { type: 'string' } } : {}),
+      ...(mode === 'wrap' ? { command: { type: 'string' }, db: { type: 'string' }, mocks: { type: 'string' }, policy: { type: 'string' } } : {}),
     },
-  }) as { values: { only?: string[]; 'dry-run'?: boolean; command?: string; db?: string; mocks?: string }; positionals: string[] };
+  }) as { values: { only?: string[]; 'dry-run'?: boolean; command?: string; db?: string; mocks?: string; policy?: string }; positionals: string[] };
   if (positionals.length > 1) fail(`${mode} takes one config file`);
   const path = positionals[0] ?? '.mcp.json';
   if (!existsSync(path)) fail(`no ${path} here; pass the path to your agent's MCP config`);
+
+  // Checked now, not when the agent next starts a server and gets nothing.
+  const policy = values.policy !== undefined ? resolve(values.policy) : undefined;
+  if (policy !== undefined) loadPolicy(policy, null);
 
   const text = readFileSync(path, 'utf8');
   let config: unknown;
@@ -959,7 +974,7 @@ function wrapCommand(argv: string[], mode: 'wrap' | 'unwrap'): void {
   try {
     changed =
       mode === 'wrap'
-        ? wrapConfig(config, { only: values.only, command: values.command, db: values.db, mocks: values.mocks })
+        ? wrapConfig(config, { only: values.only, command: values.command, db: values.db, mocks: values.mocks, policy })
         : unwrapConfig(config, { only: values.only });
   } catch (error) {
     fail(`${path}: ${(error as Error).message}`);

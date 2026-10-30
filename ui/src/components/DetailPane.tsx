@@ -5,6 +5,7 @@ import type { Exchange } from '../exchanges';
 import { formatBytes, formatClock, formatDuration } from '../format';
 import { formatTokens } from '../../../src/tokens.js';
 import { DiffView } from './DiffView';
+import { isPolicy } from './ExchangeList';
 import { ReplayPanel, type ReplayOutcome } from './ReplayPanel';
 import { JsonTree, type Json } from './JsonTree';
 
@@ -130,7 +131,15 @@ export function DetailPane({ exchange, sessionName, compareBase, onCompareBase, 
             {failure && <p className="detail-failure mono">{failure}</p>}
             {exchange.response?.mock && (
               <p className="detail-mock">
-                Response from mock rule <strong>{exchange.response.mock}</strong>
+                {isPolicy(exchange.response.mock) ? (
+                  <>
+                    Answered or changed by the policy: <strong>{exchange.response.mock.slice('policy: '.length)}</strong>
+                  </>
+                ) : (
+                  <>
+                    Response from mock rule <strong>{exchange.response.mock}</strong>
+                  </>
+                )}
               </p>
             )}
             {exchange.issues.length > 0 && <IssueList issues={exchange.issues} />}
