@@ -357,19 +357,6 @@ export class Store {
       .all(afterId, limit) as unknown as MessageRow[];
   }
 
-  /** Runs `work` in one write transaction: all of it lands, or none. */
-  transaction<T>(work: () => T): T {
-    this.db.exec('BEGIN IMMEDIATE');
-    try {
-      const result = work();
-      this.db.exec('COMMIT');
-      return result;
-    } catch (error) {
-      this.db.exec('ROLLBACK');
-      throw error;
-    }
-  }
-
   /** The id of the message `count` back from the newest, for "tail -n" style starts. */
   idBeforeLast(count: number, sessionId?: number): number {
     const row = (
@@ -415,6 +402,19 @@ export class Store {
       if (changes === 0) this.db.prepare('DELETE FROM sessions WHERE id = ?').run(id);
       this.db.exec('COMMIT');
       return changes === 0;
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    }
+  }
+
+  /** Runs `work` in one write transaction: all of it lands, or none. */
+  transaction<T>(work: () => T): T {
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      const result = work();
+      this.db.exec('COMMIT');
+      return result;
     } catch (error) {
       this.db.exec('ROLLBACK');
       throw error;
