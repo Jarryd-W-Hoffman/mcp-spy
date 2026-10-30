@@ -3,7 +3,7 @@ import { PassThrough } from 'node:stream';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { MockEngine, type MockFile } from '../src/mocks.js';
 import { parsePolicy, PolicyEngine, type PolicyFile } from '../src/policy.js';
-import { POLICY_ERROR } from '../src/proxy/interceptor.js';
+import { Interceptor, POLICY_ERROR } from '../src/proxy/interceptor.js';
 import { runStdioProxy } from '../src/proxy/stdio.js';
 import { Store } from '../src/store.js';
 import { echoServer } from './helpers.js';
@@ -277,5 +277,54 @@ describe('stdio proxy with a policy', () => {
     proxy.send(tool(1, 'echo', { text: 'late' }));
     await proxy.end();
     expect(text(proxy.lines.find((line) => line.id === 1)!)).toBe('late');
+  });
+});
+
+describe('asking, and cancellation', () => {
+  const setup = (askTimeoutMs = 60_000) => {
+    const toServer: unknown[] = [];
+    const toClient: Record<string, unknown>[] = [];
+    const policy = new PolicyEngine(null, 'echo', '/', () => {}, parsePolicy(JSON.stringify({ rules: [{ name: 'deploys', tool: 'deploy', ask: 'Deploy?' }] }), '/'));
+    const interceptor = new Interceptor({
+      mocks: null,
+      policy,
+      toServer: (line) => toServer.push(JSON.parse(line)),
+      toClient: (line) => toClient.push(JSON.parse(line) as Record<string, unknown>),
+      recordReply: () => {},
+      warn: () => {},
+      askTimeoutMs,
+    });
+    const send = (message: object) => interceptor.fromClient(JSON.stringify({ jsonrpc: '2.0', ...message }));
+    send({ id: 0, method: 'initialize', params: { capabilities: { elicitation: {} } } });
+    send({ id: 7, method: 'tools/call', params: { name: 'deploy', arguments: {} } });
+    return { toServer, toClient, send, interceptor };
+  };
+
+  it('drops a held call the agent cancels, so a later accept runs nothing', () => {
+    const { toServer, toClient, send } = setup();
+    send({ method: 'notifications/cancelled', params: { requestId: 7, reason: 'user hit stop' } });
+    expect(toClient.at(-1)).toEqual({ jsonrpc: '2.0', method: 'notifications/cancelled', params: { requestId: 'mcpspy-ask-1', reason: 'the agent cancelled it' } });
+    send({ id: 'mcpspy-ask-1', result: { action: 'accept' } });
+    // Only initialize reached the server; the held call got no reply, as cancelled requests don't.
+    expect(toServer).toEqual([expect.objectContaining({ method: 'initialize' })]);
+    expect(toClient.some((message) => message.id === 7)).toBe(false);
+    // Cancelling something that isn't held goes to the server as usual.
+    send({ method: 'notifications/cancelled', params: { requestId: 99 } });
+    send({ method: 'notifications/cancelled' });
+    expect(toServer).toHaveLength(3);
+  });
+
+  it('tells the agent when an ask times out, and drops a late answer', async () => {
+    const { toServer, toClient, send } = setup(20);
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    expect(toClient.slice(-2)).toEqual([
+      { jsonrpc: '2.0', method: 'notifications/cancelled', params: { requestId: 'mcpspy-ask-1', reason: 'no answer in time' } },
+      expect.objectContaining({ id: 7, result: expect.objectContaining({ isError: true }) }),
+    ]);
+    send({ id: 'mcpspy-ask-1', result: { action: 'accept' } });
+    expect(toServer).toHaveLength(1);
+    // Dropped once: the same id again is someone else's to answer.
+    send({ id: 'mcpspy-ask-1', result: {} });
+    expect(toServer).toHaveLength(2);
   });
 });
