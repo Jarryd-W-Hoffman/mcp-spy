@@ -326,3 +326,66 @@ describe('HTTP proxy streams', () => {
     await vi.waitFor(() => expect(closed).toBe(true));
   });
 });
+
+describe('HTTP proxy session lifetimes', () => {
+  let store: Store;
+  let proxy: HttpProxy | undefined;
+  let up: Awaited<ReturnType<typeof upstream>> | undefined;
+
+  beforeEach(() => (store = new Store(':memory:')));
+  afterEach(async () => {
+    await proxy?.close();
+    await up?.close();
+    proxy = undefined;
+    up = undefined;
+    store.close();
+  });
+
+  const start = async (handler: Parameters<typeof upstream>[0], sessionIdleMs?: number) => {
+    up = await upstream(handler);
+    proxy = await startHttpProxy({ upstream: up.url, store, port: 0, warn: () => {}, sessionIdleMs });
+  };
+  const post = (body: string, session?: string) =>
+    fetch(proxy!.url, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream', ...(session ? { 'mcp-session-id': session } : {}) },
+      body,
+    }).then((response) => response.text());
+  const json = (_req: IncomingMessage, res: ServerResponse) => res.writeHead(200, { 'content-type': 'application/json', 'mcp-session-id': 's1' }).end('{"jsonrpc":"2.0","id":1,"result":{}}');
+  const ended = () => store.listSessions().map((session) => session.ended_at !== null);
+
+  it('ends sessions that go quiet, and starts a new one if the agent comes back', async () => {
+    await start(json, 30);
+    await post(rpc(1, 'initialize'));
+    await vi.waitFor(() => expect(ended()).toEqual([true]));
+    await post(rpc(2, 'ping'), 's1');
+    expect(ended()).toEqual([false, true]);
+  });
+
+  it('keeps a session while one of its streams is open', async () => {
+    await start((req, res) => {
+      if (req.method === 'GET') {
+        res.writeHead(200, { 'content-type': 'text/event-stream' });
+        return res.write('data: {"jsonrpc":"2.0","method":"notifications/message"}\n\n');
+      }
+      json(req, res);
+    }, 30);
+    await post(rpc(1, 'initialize'));
+    const stream = await fetch(proxy!.url, { headers: { accept: 'text/event-stream', 'mcp-session-id': 's1' } });
+    const reader = stream.body!.getReader();
+    await reader.read();
+    await new Promise((resolve) => setTimeout(resolve, 120));
+    expect(ended()).toEqual([false]);
+    await reader.cancel();
+    await vi.waitFor(() => expect(ended()).toEqual([true]));
+  });
+
+  it('records nothing more into a session once it has ended', async () => {
+    await start((req, res) => (req.method === 'DELETE' ? res.writeHead(200).end() : json(req, res)));
+    await post(rpc(1, 'initialize'));
+    await (await fetch(proxy!.url, { method: 'DELETE', headers: { 'mcp-session-id': 's1' } })).text();
+    await post(rpc(2, 'ping'), 's1');
+    const [newer, older] = store.listSessions();
+    expect([newer!.ended_at, older!.message_count]).toEqual([null, 2]);
+  });
+});
