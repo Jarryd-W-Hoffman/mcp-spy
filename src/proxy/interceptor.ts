@@ -20,7 +20,8 @@ export interface InterceptorOptions {
 const ASK_PREVIEW = 500;
 
 type Message = { id?: unknown; method?: unknown; params?: unknown; result?: unknown };
-type Settle = (approved: boolean, why: string) => void;
+/** Ends an ask. `answered`: the agent replied to it; `cancelled`: the agent cancelled the held call, which then gets no reply. */
+type Settle = (approved: boolean, why: string, how?: 'answered' | 'cancelled') => void;
 
 /**
  * Handles stdio traffic line by line when the proxy has to act on it. A
@@ -44,6 +45,10 @@ export class Interceptor {
   private canAsk = false;
   /** Asks awaiting the agent's answer, by the id the proxy gave them. */
   private readonly asking = new Map<string, Settle>();
+  /** The ask holding each call, by the call's JSON-RPC id (JSON-encoded). */
+  private readonly held = new Map<string, string>();
+  /** Asks that ended without an answer; a late answer is dropped, since the server never asked. */
+  private readonly unanswered = new Set<string>();
   private asks = 0;
 
   constructor(private readonly options: InterceptorOptions) {}
@@ -71,8 +76,14 @@ export class Interceptor {
     // The agent's answer to an ask of ours: the server never sent it, so it never sees the answer.
     if (isObject(message) && message.method === undefined && typeof message.id === 'string' && this.asking.has(message.id)) {
       const accepted = isObject(message.result) && message.result.action === 'accept';
-      this.asking.get(message.id)!(accepted, accepted ? '' : 'the user declined');
+      this.asking.get(message.id)!(accepted, accepted ? '' : 'the user declined', 'answered');
       return;
+    }
+    if (isObject(message) && message.method === undefined && typeof message.id === 'string' && this.unanswered.delete(message.id)) return;
+    // The agent gave up on a held call: it must not run on a later accept, and the server never saw it.
+    if (isObject(message) && message.method === 'notifications/cancelled' && isObject(message.params)) {
+      const askId = this.held.get(JSON.stringify(message.params.requestId));
+      if (askId !== undefined) return this.asking.get(askId)!(false, 'the agent cancelled it', 'cancelled');
     }
     if (!isObject(message) || typeof message.method !== 'string') return toServer(policy ? JSON.stringify(message) : line);
     const request = message as Message & { method: string };
@@ -190,15 +201,23 @@ export class Interceptor {
     const shown = args.length > ASK_PREVIEW ? `${args.slice(0, ASK_PREVIEW)}…` : args;
     this.pending++;
     const timer = setTimeout(() => settle(false, 'no answer in time'), this.options.askTimeoutMs ?? 120_000);
-    const settle: Settle = (approved, why) => {
+    const heldId = JSON.stringify(message.id);
+    const settle: Settle = (approved, why, how) => {
       clearTimeout(timer);
       this.asking.delete(askId);
+      this.held.delete(heldId);
+      if (how !== 'answered') {
+        // Lets the agent close its prompt; an answer that comes anyway is dropped.
+        this.unanswered.add(askId);
+        this.reply(JSON.stringify({ jsonrpc: '2.0', method: 'notifications/cancelled', params: { requestId: askId, reason: why } }), `policy: ${rule}`);
+      }
       this.options.warn(`policy ${approved ? 'approved' : 'denied'} ${what} (${rule}) after asking${approved ? '' : `: ${why}`}`);
       if (approved) this.forward(message, JSON.stringify(message));
-      else this.reply(JSON.stringify(denial(message, `${prompt} (${why})`)), `policy: ${rule}`);
+      else if (how !== 'cancelled') this.reply(JSON.stringify(denial(message, `${prompt} (${why})`)), `policy: ${rule}`);
       if (--this.pending === 0) this.idle?.();
     };
     this.asking.set(askId, settle);
+    this.held.set(heldId, askId);
     const request = {
       jsonrpc: '2.0',
       id: askId,

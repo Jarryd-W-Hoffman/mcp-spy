@@ -268,6 +268,9 @@ Every message is checked as it is recorded, against what the server itself decla
 - **Calls:** `tools/call` arguments against the tool's `inputSchema` (JSON Schema draft-07 or 2020-12, with formats such as `uri` and `date-time`), and calls to tools the server never listed.
 - **Results:** content blocks against the MCP rules (block types and their required fields, `isError`) and, when the tool has an `outputSchema`, `structuredContent` against it.
 - **Tool lists:** duplicate names, names outside `A–Z a–z 0–9 _ - .`, and missing or invalid schemas.
+- **The handshake:** an `initialize` result without a `protocolVersion`, `capabilities`, or `serverInfo` name and version, and requests other than `ping` sent before it arrived (warnings).
+- **Capabilities:** each side may only use what the other declared in `initialize`. A server asking for `sampling`, `roots` or `elicitation` the client didn't declare is an error. A client calling `resources/*`, `prompts/*`, `tools/*`, `logging/setLevel` or `completion/complete` without the server's capability is a warning, since the server will just refuse (`completions` only from protocol `2025-03-26`, which added it). So are `list_changed` and `resources/updated` notifications the sender didn't declare. Sessions mcpspy joined after `initialize`, such as an HTTP session that started before the proxy, skip these checks.
+- **Resources and prompts:** results of `resources/list`, `resources/templates/list`, `resources/read`, `prompts/list` and `prompts/get` against the MCP shapes.
 
 Issues show up as `⚠ 2 issues` in `tail`, as a badge and a list in the UI (with a *Schema issues* filter), and in `mcpspy validate`, which exits 1 on errors:
 
@@ -376,7 +379,7 @@ flowchart LR
 
 - **Rules** are checked in order, and the first one that matches decides. A rule matches on `tool` (with `*` wildcards), or `method` for anything other than `tools/call`, and on `server` (the `--name`, with wildcards). It may also have a `where` of tests on the arguments (or a request's params), keyed by dot path. It then `allow`s (`true`), `deny`s with a reason the agent sees, or `ask`s with a prompt. When an allow rule's tests fail, the refusal names the argument (`"path" is not allowed for read_file`).
 - **Tests**:
-  - `under` (directories, relative to the policy file): the path must be inside one of them once symlinks are followed, so `src/../../etc` and a link out of `src/` both fail. A relative path in the arguments is resolved against the server's working directory.
+  - `under` (directories, relative to the policy file): the path must be inside one of them once symlinks are followed, so `src/../../etc` and a link out of `src/` both fail. A relative path in the arguments is resolved against the server's working directory. A leading `~` means the home directory, as servers that expand it read it, and `~user` paths are refused.
   - `in`: one of a list of values.
   - `match` and `notMatch`: regular expressions.
   - `max`: for numbers.
@@ -384,7 +387,7 @@ flowchart LR
 
   A missing argument fails every test.
 - **Default**: a tool call no rule matches is denied, unless the file says `"default": "allow"`. Other methods, such as `initialize` and `tools/list`, pass unless a rule names them.
-- **Asking**: an `ask` rule holds the call and asks the agent's user, through MCP elicitation, whether to let it through. The call goes ahead only if the user accepts. It's refused if they decline, if nobody answers within two minutes, or if the agent closes its connection first. It's also refused if the agent didn't declare elicitation support, or if the server is behind `mcpspy proxy`: the HTTP proxy has no way to ask.
+- **Asking**: an `ask` rule holds the call and asks the agent's user, through MCP elicitation, whether to let it through. The call goes ahead only if the user accepts. It's refused if they decline, if nobody answers within two minutes, or if the agent closes its connection first. If the agent cancels the call while it's held, the call is dropped and never runs, even if the user accepts afterwards. When an ask ends unanswered, the agent is told, so it can close its prompt. It's also refused if the agent didn't declare elicitation support, or if the server is behind `mcpspy proxy`: the HTTP proxy has no way to ask.
 - **Rates**: `rate` on an allow rule (`"10/minute"`, per `second`, `minute`, `hour` or `day`) refuses calls beyond the limit, over a sliding window.
 - **Tool lists** lose the tools no call could be allowed to use, so the agent doesn't plan around them. A tool that some arguments could unlock stays listed.
 - **Results**: `maxBytes` replaces an oversized tool result with an error. `redact` replaces matches in everything the server sends the agent: tool results and lists, resource contents, prompts, errors, log notifications and the server's own requests (such as `sampling/createMessage`), batches included. The JSON-RPC envelope (`jsonrpc`, `id`, `method`) is never changed, so a broad pattern can't break the protocol. This is unlike [Secrets](#-secrets), which only changes the record.
@@ -413,7 +416,9 @@ It allows what the session did, not what it should do, so review it before you r
 - **Broken policy:** mcpspy refuses to start the server, and `wrap` refuses to write the config.
 - **Broken edit:** while running, the policy reloads when you save it. A broken edit keeps the old rules in force.
 - **What the server sees:** the request exactly as it was checked, re-serialised. JSON with duplicate keys therefore can't show the policy one tool name and the server another.
+- **Compressed replies:** behind `mcpspy proxy`, a reply the server compressed is decompressed and checked like any other. One in an encoding mcpspy can't read is refused (`502`).
 - **Batches and invalid lines:** batched requests, and lines from the agent that aren't JSON, are refused.
+- **Other HTTP methods:** behind `mcpspy proxy`, only `POST` bodies are checked, so a `PUT`, `PATCH` or any other request with a body is refused (`405`) and never reaches the server.
 
 <p align="center">
     <img src="docs/policy.png" alt="A read_file call for project/../.ssh/id_ed25519 refused by the default deny rule: the detail pane gives the reason the agent saw, and policy badges mark every call the policy answered or changed." width="900">
@@ -610,11 +615,11 @@ Each request is matched to a session like this:
 | no header, on a legacy `/messages?sessionId=…` endpoint | the session whose event stream named that endpoint |
 | none of these | the latest session, for servers that never assign ids |
 
-A session ends when the agent sends `DELETE`, when its legacy event stream closes, or after 30 minutes with no traffic and no open stream. An agent can vanish without saying goodbye, so the idle limit stops the proxy holding on to its sessions forever. A request that names an ended session starts a new one.
+A session ends when the agent sends `DELETE`, when its legacy event stream closes, or after 30 minutes with no traffic and nothing in flight (no open stream, no request awaiting its reply). An agent can vanish without saying goodbye, so the idle limit stops the proxy holding on to its sessions forever. A request that names an ended session starts a new one.
 
 The legacy HTTP+SSE transport works differently. The client opens an event stream with a GET, and the server's first event names the URL to POST messages to. When that URL is absolute, the proxy rewrites it to point at itself, or the agent's messages would go straight past it.
 
-To make that possible, SSE responses are forwarded **one event at a time** rather than byte by byte. Each event is held until its terminating blank line, recorded, rewritten if it has to be, then sent. An event isn't usable by the client until that blank line anyway, so this adds no delay. JSON responses are buffered and forwarded whole. The proxy asks the server for uncompressed bodies so it can read them; if a server compresses anyway, the bytes pass through untouched and a decompressed copy is recorded.
+To make that possible, SSE responses are forwarded **one event at a time** rather than byte by byte. Each event is held until its terminating blank line, recorded, rewritten if it has to be, then sent. An event isn't usable by the client until that blank line anyway, so this adds no delay. JSON responses are buffered and forwarded whole. The proxy asks the server for uncompressed bodies so it can read them. If a server compresses anyway (gzip, deflate or brotli), the proxy decompresses the reply and forwards it plain, so what's recorded and checked is exactly what the agent gets. A reply in an encoding mcpspy can't read passes through untouched, unless a policy is set: then it's refused, since it can't be checked.
 
 ### The live UI
 

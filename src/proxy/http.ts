@@ -54,8 +54,8 @@ interface Tracked {
   open: boolean;
   /** When the agent or server last sent anything in this session. */
   lastSeen: number;
-  /** Event streams open for this session; it never goes idle while one is. */
-  streams: number;
+  /** HTTP exchanges in flight (requests awaiting a reply, open event streams); it never goes idle while one is. */
+  busy: number;
 }
 
 /**
@@ -104,10 +104,23 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
       pid: null,
       started_at: Date.now(),
     });
-    const tracked = { sessionId, recorder: new Recorder(store, sessionId, undefined, redactor), open: true, lastSeen: Date.now(), streams: 0 };
+    const tracked = { sessionId, recorder: new Recorder(store, sessionId, undefined, redactor), open: true, lastSeen: Date.now(), busy: 0 };
     all.add(tracked);
     return tracked;
   };
+  const held = new WeakSet<ServerResponse>();
+  /** Keeps a session alive until this exchange's response closes. Counted once, though a legacy stream is only tied to its session late. */
+  const hold = (tracked: Tracked, res: ServerResponse): void => {
+    tracked.lastSeen = Date.now();
+    if (held.has(res)) return;
+    held.add(res);
+    tracked.busy++;
+    res.on('close', () => {
+      tracked.busy--;
+      tracked.lastSeen = Date.now();
+    });
+  };
+
   /** Ends a session in the log and forgets it, so a request naming it later starts a new one. */
   const end = (tracked: Tracked): void => {
     if (!tracked.open) return;
@@ -140,6 +153,12 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
     const local = `${target.pathname}${target.search}`;
     const method = req.method!;
     const body = method === 'GET' || method === 'HEAD' || method === 'DELETE' ? Buffer.alloc(0) : await readAll(req);
+    // Only POST bodies are checked, so with a policy, a body on any other method (PUT, PATCH, …) never reaches the server.
+    if (policy && method !== 'POST' && body.length > 0) {
+      warn(`policy: refused a ${method} request with a body`);
+      res.writeHead(405, { 'content-type': 'text/plain', allow: 'GET, POST, DELETE' }).end(`mcpspy's policy only checks POST bodies, so it refuses a ${method} with one`);
+      return;
+    }
     const text = body.toString('utf8');
     const parsed = parseJson(text);
     const sessionHeader = header(req.headers, 'mcp-session-id');
@@ -158,7 +177,7 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
       }
     }
     // A GET without a session is the legacy transport's event stream (or not MCP at all); tracked once we see SSE.
-    if (tracked) tracked.lastSeen = Date.now();
+    if (tracked) hold(tracked, res);
 
     let forwarded = body;
     if (tracked && method === 'POST' && text.trim() !== '') {
@@ -239,6 +258,25 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
       const type = header(up.headers, 'content-type') ?? '';
       const encoding = header(up.headers, 'content-encoding');
       const encoded = encoding !== null && encoding !== 'identity';
+      if (encoded && !DECODERS.has(encoding)) {
+        if (policy) {
+          // Replies the policy can't read can't be checked: hidden tools or unredacted results could get through.
+          up.resume();
+          warn(`policy: refused a reply compressed with ${encoding}, which mcpspy can't read`);
+          res.writeHead(502, { 'content-type': 'text/plain' }).end(`mcpspy's policy can't check a reply compressed with ${encoding}`);
+          return;
+        }
+        res.writeHead(up.statusCode!, responseHeaders);
+        up.pipe(res);
+        return;
+      }
+      // We asked for identity; a server that compressed anyway is decoded here, so what's
+      // checked and recorded is exactly what the agent gets. A corrupt body resets the reply.
+      const source: NodeJS.ReadableStream = encoded ? decompress(up, encoding, () => res.destroy()) : up;
+      if (encoded) {
+        delete responseHeaders['content-encoding'];
+        delete responseHeaders['content-length'];
+      }
 
       if (type.startsWith('text/event-stream')) {
         if (!tracked && method === 'GET' && up.statusCode === 200) {
@@ -250,25 +288,12 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
         res.writeHead(up.statusCode!, responseHeaders);
         res.flushHeaders();
         const session = tracked;
-        if (session) {
-          session.streams++;
-          res.on('close', () => {
-            session.streams--;
-            session.lastSeen = Date.now();
-          });
-        }
-        if (encoded) {
-          // We asked for identity; if the server compressed anyway, forward as-is and read a decompressed copy.
-          up.pipe(res);
-          const parser = new SseParser((event) => session && onServerEvent(session, event, target));
-          decompress(up, encoding).on('data', (chunk: Buffer) => parser.push(chunk));
-          return;
-        }
+        if (session) hold(session, res);
         const parser = new SseParser((event) => {
           res.write(session ? (onServerEvent(session, event, target, req.headers.host) ?? event.raw) : event.raw);
         });
-        up.on('data', (chunk: Buffer) => parser.push(chunk));
-        up.on('end', () => {
+        source.on('data', (chunk: Buffer) => parser.push(chunk));
+        source.on('end', () => {
           res.end(parser.rest());
           if (session && method === 'GET' && sessionHeader === null) end(session); // the legacy stream is the session
         });
@@ -281,17 +306,17 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
 
       // JSON and anything else: buffer (MCP responses are single messages), record, then forward.
       const chunks: Buffer[] = [];
-      up.on('data', (chunk: Buffer) => chunks.push(chunk));
+      source.on('data', (chunk: Buffer) => chunks.push(chunk));
       up.on('error', () => res.destroy());
-      up.on('end', () => {
+      source.on('end', () => {
         let raw = Buffer.concat(chunks);
         // Responses always carry a status line.
         const status = up.statusCode!;
         const session = tracked;
-        const decoded = encoded ? null : raw.toString('utf8');
-        const reply = decoded !== null && type.includes('json') ? parseJson(decoded) : undefined;
+        const decoded = raw.toString('utf8');
+        const reply = type.includes('json') ? parseJson(decoded) : undefined;
 
-        if (session && decoded !== null && reply !== undefined && isJsonRpc(reply)) {
+        if (session && reply !== undefined && isJsonRpc(reply)) {
           const shaped = shapeReply(session, reply);
           if (shaped !== null) {
             raw = Buffer.from(shaped.text);
@@ -299,7 +324,7 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
           }
           record(() => session.recorder.frame('server', shaped?.text ?? decoded, shaped?.rule ?? mockedBy));
         } else if (session && status >= 400) {
-          const detail = decoded !== null ? decoded.trim().slice(0, 500) : `${raw.length} bytes, ${encoding}`;
+          const detail = decoded.trim().slice(0, 500);
           record(() => session.recorder.stderr(`[http] ${status} ${up.statusMessage} for ${method} ${local}${detail ? `: ${detail}` : ''}`));
         }
         res.writeHead(status, responseHeaders).end(raw);
@@ -411,7 +436,7 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
   const idleMs = options.sessionIdleMs ?? 30 * 60_000;
   const sweep = setInterval(
     () => {
-      for (const tracked of all) if (tracked.streams === 0 && Date.now() - tracked.lastSeen > idleMs) end(tracked);
+      for (const tracked of all) if (tracked.busy === 0 && Date.now() - tracked.lastSeen > idleMs) end(tracked);
     },
     Math.min(idleMs, 60_000),
   ).unref();
@@ -460,9 +485,17 @@ function readAll(stream: IncomingMessage): Promise<Buffer> {
   });
 }
 
-function decompress(stream: IncomingMessage, encoding: string): NodeJS.ReadableStream {
-  const decoder = encoding === 'br' ? createBrotliDecompress() : encoding === 'deflate' ? createInflate() : createGunzip();
-  decoder.on('error', () => {});
+/** The content encodings mcpspy can decode. */
+const DECODERS = new Map([
+  ['gzip', createGunzip],
+  ['x-gzip', createGunzip],
+  ['deflate', createInflate],
+  ['br', createBrotliDecompress],
+]);
+
+function decompress(stream: IncomingMessage, encoding: string, onError: () => void): NodeJS.ReadableStream {
+  const decoder = DECODERS.get(encoding)!();
+  decoder.on('error', onError);
   return stream.pipe(decoder);
 }
 
