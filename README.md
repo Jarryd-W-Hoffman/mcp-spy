@@ -450,6 +450,7 @@ Patterns can't catch everything, such as a password in free text with nothing ar
 | `mcpspy diff <id> <id>` | Diff two messages, or two requests and their responses. |
 | `mcpspy replay <id> [--args <json> \| --params <json>] [--repeat <n>] [-e K=V] [-H 'Name: value']` | Re-run a recorded request against a fresh server (or session) and diff the response. |
 | `mcpspy suite add <file> <id>...` / `mcpspy suite run <file> [--update] [-H …]` | Save recorded calls as a regression suite, and run it. |
+| `mcpspy export [--session <id>]...` / `mcpspy import <file \| ->` | Copy sessions between logs as JSON Lines (see [Moving and sharing sessions](#moving-and-sharing-sessions)). |
 | `mcpspy prune [--older-than 30d] [--keep <n>] [--max-size 500MB] [--dry-run] [--vacuum]` | Delete old sessions so the log stops growing; `MCPSPY_RETENTION` makes `mcpspy ui` do it daily. |
 | `mcpspy validate [--session <id>]` | List schema and protocol issues; exits 1 if there are errors. |
 | `mcpspy mock serve <file>` / `mcpspy mock add <file> <id>...` | Run a stand-in server from mock rules; turn recorded calls into rules. |
@@ -681,6 +682,19 @@ Or set `MCPSPY_RETENTION` to an age, a size, or both (`30d`, `1GB`, `30d,1GB`). 
 
 Or delete the file to start over.
 
+### Moving and sharing sessions
+
+`mcpspy export` writes sessions as JSON Lines: all of them by default, or the ones you pick with `--session <id>` (repeatable). `mcpspy import` adds them to another log, such as a teammate's or the one on another machine:
+
+```sh
+mcpspy export --session 12 > flaky-search.jsonl
+mcpspy import flaky-search.jsonl          # or: … | mcpspy import -
+```
+
+- **They arrive as new sessions.** Imported sessions get new ids. The links between them come along: which response answers which request, and which session a replay came from. Links to sessions outside the file are dropped.
+- **Nothing is imported unless everything is.** Each line is checked, and the whole import runs in one transaction, so a bad line imports nothing and the error names the line.
+- **Check an export before you share it.** Secrets mcpspy redacted while recording stay redacted, but tool arguments and results are included as recorded.
+
 ## How it's built
 
 | Part | Technology |
@@ -709,6 +723,7 @@ src/
 ├── mocks.ts            ← mock rules
 ├── policy.ts           ← policy rules: which calls an agent may make
 ├── policy-suggest.ts   ← mcpspy policy suggest
+├── transfer.ts         ← mcpspy export and import
 ├── rpc-client.ts · http-client.ts     ← the minimal clients replay and suites use
 ├── replay.ts · suite.ts · diff.ts
 └── server.ts           ← the UI's API and live stream

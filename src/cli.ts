@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process';
-import { existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { createReadStream, existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { createInterface } from 'node:readline';
 import { parseArgs } from 'node:util';
 import { comparableBody, diffLines, hunks, jsonLines } from './diff.js';
 import {
@@ -29,6 +30,7 @@ import { toolsReport } from './report.js';
 import { isLoopbackHost, startUiServer } from './server.js';
 import { addCases, emptySuite, parseSuite, runSuite, updateExpectations, type Suite } from './suite.js';
 import { formatTokens } from './tokens.js';
+import { exportSessions, importSessions } from './transfer.js';
 import { defaultDbPath, Store, type MessageRow, type SessionRow } from './store.js';
 import type { Issue } from './types.js';
 import { resolveUiDir } from './ui-dir.js';
@@ -57,6 +59,8 @@ Usage:
   mcpspy policy suggest [--session <id>]    draft a policy allowing what a session did
   mcpspy wrap [<config>] [--only <name>]... [--dry-run] [--command <path>] [--db <path>] [--mocks <file>] [--policy <file>]
   mcpspy unwrap [<config>] [--only <name>]... [--dry-run]
+  mcpspy export [--session <id>]... [--db <path>] > log.jsonl   all sessions by default
+  mcpspy import <file | -> [--db <path>]
   mcpspy prune [--older-than <30d>] [--keep <n>] [--max-size <500MB>] [--dry-run] [--vacuum] [--db <path>]
 
 mcpspy wrap puts mcpspy in front of every stdio server in an MCP config
@@ -138,6 +142,10 @@ export async function main(argv: string[]): Promise<void> {
       return policyCommand(rest);
     case 'proxy':
       return proxyCommand(rest);
+    case 'export':
+      return exportCommand(rest);
+    case 'import':
+      return importCommand(rest);
     case 'prune':
       return prune(rest);
     case 'wrap':
@@ -416,6 +424,42 @@ async function tail(argv: string[]): Promise<void> {
     clearInterval(timer);
     store.close();
   });
+}
+
+function exportCommand(argv: string[]): void {
+  const { values } = parseArgs({ args: argv, options: { session: { type: 'string', multiple: true }, db: { type: 'string' } } });
+  const store = new Store(values.db);
+  const ids = values.session?.map((id) => parseId(id, '--session')) ?? store.listSessions(Number.MAX_SAFE_INTEGER).map((session) => session.id).reverse();
+  const missing = ids.find((id) => !store.getSession(id));
+  if (missing !== undefined) {
+    store.close();
+    fail(`no session with id ${missing}`);
+  }
+  const { sessions, messages } = exportSessions(store, ids, (line) => process.stdout.write(`${line}\n`));
+  store.close();
+  process.stderr.write(`Exported ${plural(sessions, 'session')} (${plural(messages, 'message')}). It holds tool arguments and results as recorded: check it before sharing.\n`);
+}
+
+async function importCommand(argv: string[]): Promise<void> {
+  const { values, positionals } = parseArgs({ args: argv, allowPositionals: true, options: { db: { type: 'string' } } });
+  if (positionals.length !== 1) fail('import takes one file (or - for stdin)');
+  const [file] = positionals as [string];
+  if (file !== '-' && !existsSync(file)) fail(`no such file: ${file}`);
+  const input = file === '-' ? process.stdin : createReadStream(file);
+  const store = new Store(values.db);
+  try {
+    const { sessions, messages } = await importSessions(store, createInterface({ input, crlfDelay: Infinity }));
+    const ids = sessions.length === 0 ? '' : sessions.length === 1 ? ` as #${sessions[0]}` : ` as #${sessions[0]}–#${sessions.at(-1)}`;
+    process.stderr.write(`Imported ${plural(sessions.length, 'session')} (${plural(messages, 'message')})${ids}.\n`);
+  } catch (error) {
+    fail(`import failed, nothing imported: ${(error as Error).message}`);
+  } finally {
+    store.close();
+  }
+}
+
+function plural(count: number, noun: string): string {
+  return `${count} ${noun}${count === 1 ? '' : 's'}`;
 }
 
 function sessions(argv: string[]): void {
