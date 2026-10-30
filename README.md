@@ -578,6 +578,7 @@ Or delete the file to start over.
 
 ```text
 src/
+├── bin.ts              ← the executable: starts cli.ts
 ├── cli.ts              ← every command
 ├── proxy/
 │   ├── stdio.ts        ← mcpspy run

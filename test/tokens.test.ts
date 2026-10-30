@@ -91,3 +91,60 @@ describe('formatTokens', () => {
     expect(formatTokens(250_000)).toBe('250k');
   });
 });
+
+describe('estimates at the edges', () => {
+  const bytes = (...values: number[]) => Buffer.from(values).toString('base64');
+  const riff = (chunk: string, fill: (buffer: Buffer) => void) => {
+    const buffer = Buffer.alloc(32);
+    buffer.write('RIFF', 0);
+    buffer.write('WEBP', 8);
+    buffer.write(chunk, 12);
+    fill(buffer);
+    return buffer.toString('base64');
+  };
+
+  it('reads GIF and WebP sizes, and gives up on everything else', () => {
+    expect(imageSize(Buffer.from('GIF89a\x02\x00\x03\x00', 'latin1').toString('base64'))).toEqual({ width: 2, height: 3 });
+    expect(imageSize(Buffer.from('GIF', 'latin1').toString('base64'))).toEqual({ width: 0, height: 0 });
+    expect(imageSize(riff('VP8 ', (b) => (b.writeUInt16LE(640, 26), b.writeUInt16LE(480, 28))))).toEqual({ width: 640, height: 480 });
+    expect(imageSize(riff('VP8L', (b) => b.writeUInt32LE((99 << 14) | 199, 21)))).toEqual({ width: 200, height: 100 });
+    expect(imageSize(riff('VP8X', (b) => (b.writeUIntLE(799, 24, 3), b.writeUIntLE(599, 27, 3))))).toEqual({ width: 800, height: 600 });
+    expect(imageSize(riff('ALPH', () => {}))).toBeNull();
+    expect(imageSize(Buffer.from('RIFF0000WAVE').toString('base64'))).toBeNull();
+    expect(imageSize(Buffer.from('RI').toString('base64'))).toBeNull();
+    expect(imageSize(Buffer.from('R').toString('base64'))).toBeNull();
+    expect(imageSize(Buffer.from('GI').toString('base64'))).toBeNull();
+    expect(imageSize(Buffer.from('G').toString('base64'))).toBeNull();
+    expect(imageSize(Buffer.from('BM').toString('base64'))).toBeNull();
+    expect(imageSize('!!not base64!!')).toBeNull();
+    // JPEG without a frame header, and with a broken segment.
+    expect(imageSize(bytes(0xff, 0xd8, 0xff, 0xe0, 0x00, 0x02, 0xff, 0xe1, 0x00, 0x02, 0, 0))).toBeNull();
+    expect(imageSize(bytes(0xff, 0xd8, 0x00, 0, 0, 0, 0, 0, 0, 0, 0, 0))).toBeNull();
+  });
+
+  it('costs nothing for empty images and tolerates odd content', () => {
+    expect(estimateImageTokens(0, 10)).toBe(0);
+    expect(estimateImageTokens(10, 0)).toBe(0);
+    expect(toModelTools([{ name: 'a' }, 'not a tool'])).toEqual([{ name: 'a', input_schema: { type: 'object' } }]);
+    const cost = contextCost('tools/call', JSON.stringify({ result: { content: [
+      'not a block',
+      { type: 'text' },
+      { type: 'image' },
+      { type: 'image', data: Buffer.from('BM').toString('base64') },
+      { type: 'resource', resource: 'nope' },
+      { type: 'resource', resource: { blob: 'QUJD' } },
+      { type: 'audio', data: 'x' },
+    ] } }));
+    expect(cost).toMatchObject({ images: 2 });
+    expect(cost!.tokens).toBeGreaterThan(2000);
+  });
+
+  it('returns nothing for replies without the expected parts', () => {
+    expect(contextCost(null, '{}')).toBeNull();
+    expect(contextCost('tools/call', '{"error":{}}')).toEqual({ tokens: 0 });
+    expect(contextCost('tools/list', '{"result":{}}')).toBeNull();
+    expect(contextCost('tools/call', '{"result":{}}')).toBeNull();
+    expect(contextCost('prompts/get', '{"result":{}}')).toBeNull();
+    expect(contextCost('resources/read', '{"result":{}}')).toBeNull();
+  });
+});

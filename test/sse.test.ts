@@ -43,3 +43,22 @@ describe('formatSseEvent', () => {
     expect(parse([text]).events[0]).toMatchObject({ event: 'endpoint', id: '3', data: 'a\nb' });
   });
 });
+
+describe('bytes and ids', () => {
+  it('decodes byte chunks and reads event ids', () => {
+    const events: SseEvent[] = [];
+    const parser = new SseParser((event) => events.push(event));
+    parser.push(new TextEncoder().encode('id: 7\ndata: {"a":1}\n\n'));
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({ id: '7', data: '{"a":1}' });
+  });
+});
+
+describe('text and other fields', () => {
+  it('accepts string chunks and ignores fields it does not use', () => {
+    const events: SseEvent[] = [];
+    const parser = new SseParser((event) => events.push(event));
+    parser.push('retry: 1000\ndata: x\n\n');
+    expect(events[0]).toMatchObject({ data: 'x' });
+  });
+});

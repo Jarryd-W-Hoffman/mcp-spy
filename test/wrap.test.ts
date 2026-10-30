@@ -74,3 +74,14 @@ describe('unwrapConfig', () => {
     expect(unwrapConfig(handWritten).config).toEqual(handWritten);
   });
 });
+
+describe('remote servers', () => {
+  it('names serverUrl, or a placeholder, when skipping them', () => {
+    const { changes } = wrapConfig({ mcpServers: { a: { serverUrl: 'https://a.example/mcp' }, b: { type: 'http' }, c: { url: 42 } } });
+    expect(changes.map((change) => change.reason)).toEqual([
+      'reached over HTTP: run mcpspy proxy https://a.example/mcp and point the agent at it',
+      'reached over HTTP: run mcpspy proxy <url> and point the agent at it',
+      'reached over HTTP: run mcpspy proxy <url> and point the agent at it',
+    ]);
+  });
+});

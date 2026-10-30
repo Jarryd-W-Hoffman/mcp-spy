@@ -95,7 +95,7 @@ export function jsonLines(value: unknown): string[] {
   const sorted = JSON.stringify(
     value,
     (_key, item: unknown) =>
-      isPlainObject(item) ? Object.fromEntries(Object.entries(item).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))) : item,
+      isPlainObject(item) ? Object.fromEntries(Object.entries(item).sort(([a], [b]) => (a < b ? -1 : 1))) : item,
     2,
   );
   return (sorted ?? 'undefined').split('\n');

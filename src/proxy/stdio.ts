@@ -163,9 +163,10 @@ export function runStdioProxy(options: StdioProxyOptions): Promise<StdioProxyRes
       finish(error.code === 'ENOENT' ? 127 : 126, null);
     });
 
-    // "close" waits for the server's stdio to drain, unlike "exit".
+    // "close" waits for the server's stdio to drain, unlike "exit". Node gives
+    // either an exit code or the signal that ended the process.
     child.on('close', (code, signal) => {
-      finish(code ?? 128 + (signal ? (constants.signals[signal] ?? 0) : 0), signal);
+      finish(code ?? 128 + constants.signals[signal!], signal);
     });
   });
 }

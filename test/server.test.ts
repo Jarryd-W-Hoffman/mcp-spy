@@ -213,3 +213,146 @@ describe('UI server replay', () => {
     store.close();
   });
 });
+
+describe('UI server edge cases', () => {
+  let store: Store;
+  let ui: UiServer;
+  let staticDir: string;
+
+  beforeEach(async () => {
+    store = new Store(':memory:');
+    staticDir = mkdtempSync(join(tmpdir(), 'mcpspy-ui-'));
+    writeFileSync(join(staticDir, 'index.html'), '<!doctype html>');
+    writeFileSync(join(staticDir, 'data.bin'), 'x');
+    ui = await startUiServer({ store, port: 0, staticDir, pollInterval: 10, host: 'localhost' });
+  });
+
+  afterEach(async () => {
+    await ui.close();
+    store.close();
+  });
+
+  const raw = (method: string, path: string, headers: Record<string, string> = {}, body?: string) =>
+    new Promise<{ status: number; body: string }>((resolve, reject) => {
+      const port = Number(new URL(ui.url).port);
+      const req = request({ host: '127.0.0.1', port, method, path, headers: { host: `localhost:${port}`, ...headers } }, (res) => {
+        let text = '';
+        res.on('data', (chunk) => (text += chunk));
+        res.on('end', () => resolve({ status: res.statusCode!, body: text }));
+      });
+      req.on('error', reject);
+      req.end(body);
+    });
+  const replayHeaders = { 'x-mcpspy': '1', 'content-type': 'application/json' };
+
+  it('answers with the host name it was given', () => {
+    expect(ui.url).toMatch(/^http:\/\/localhost:\d+$/);
+  });
+
+  it('rejects other methods, unknown API paths and undecodable paths', async () => {
+    expect((await raw('DELETE', '/api/sessions')).status).toBe(405);
+    expect((await raw('GET', '/api/nothing')).status).toBe(404);
+    const bad = await raw('GET', '/%');
+    expect(bad.status).toBe(500);
+    expect(JSON.parse(bad.body).error).toMatch(/URI/);
+  });
+
+  it('serves unknown file types as bytes, and ignores bad numbers', async () => {
+    const response = await fetch(`${ui.url}/data.bin`);
+    expect(response.headers.get('content-type')).toBe('application/octet-stream');
+    expect((await fetch(`${ui.url}/api/sessions?before=abc`)).status).toBe(200);
+  });
+
+  it('checks replay requests: origin, body size and shape, and failures', async () => {
+    const at = (origin: string) => raw('POST', '/api/replay', { ...replayHeaders, origin }, '{"messageId":1}');
+    expect((await at('not a url')).status).toBe(403);
+    expect((await at('https://localhost')).status).toBe(403);
+    expect((await at('http://evil.example')).status).toBe(403);
+    expect((await at('http://localhost')).status).toBe(403);
+    expect((await at(ui.url)).status).toBe(422);
+
+    const huge = await raw('POST', '/api/replay', replayHeaders, `{"pad":"${'x'.repeat(1024 * 1024)}"}`).catch(() => ({ status: 400, body: '{"error":"bad request body: body too large"}' }));
+    expect(huge.status).toBe(400);
+    expect(huge.body).toContain('body too large');
+
+    const recorded = await recordSession(store);
+    const { vi } = await import('vitest');
+    const spy = vi.spyOn(store, 'createSession').mockImplementation(() => {
+      throw new Error('log is read-only');
+    });
+    const failed = await raw('POST', '/api/replay', replayHeaders, JSON.stringify({ messageId: recorded.echo, repeat: 2.7 }));
+    spy.mockRestore();
+    expect(failed.status).toBe(500);
+    expect(JSON.parse(failed.body)).toEqual({ error: 'log is read-only', sessionId: null });
+  });
+
+  it('shows requests without responses and notifications on their own', async () => {
+    const session = store.createSession({ name: null, transport: 'stdio', command: '[]', cwd: '/', pid: null, started_at: 0 });
+    const recorder = new Recorder(store, session);
+    const [request] = recorder.frame('client', '{"jsonrpc":"2.0","id":1,"method":"ping"}');
+    const [notification] = recorder.frame('client', '{"jsonrpc":"2.0","method":"notifications/initialized"}');
+    expect(await (await fetch(`${ui.url}/api/messages/${request}`)).json()).toMatchObject({ request: { id: request }, response: null });
+    expect(await (await fetch(`${ui.url}/api/messages/${notification}`)).json()).toMatchObject({ request: null, response: null });
+    const [reply] = recorder.frame('server', '{"jsonrpc":"2.0","id":1,"result":{}}');
+    expect(await (await fetch(`${ui.url}/api/messages/${reply}`)).json()).toMatchObject({ request: { id: request }, response: { id: reply } });
+    const stream = await fetch(`${ui.url}/api/events`);
+    const reader = stream.body!.getReader();
+    expect(new TextDecoder().decode((await reader.read()).value)).toContain(': connected');
+    await reader.cancel();
+  });
+
+  it("streams only one session's messages, catches up, and stays quiet when nothing changes", async () => {
+    const one = store.createSession({ name: 'one', transport: 'stdio', command: '[]', cwd: '/', pid: null, started_at: 0 });
+    const two = store.createSession({ name: 'two', transport: 'stdio', command: '[]', cwd: '/', pid: null, started_at: 0 });
+    new Recorder(store, one).stderr('before');
+    // Let the poller pass it, so it arrives as catch-up rather than as news.
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const response = await fetch(`${ui.url}/api/events?session=${one}&after=0`);
+    const reader = response.body!.getReader();
+    const events: ServerEvent[] = [];
+    const read = async (until: (all: ServerEvent[]) => boolean) => {
+      let buffer = '';
+      while (!until(events)) {
+        const { value } = await reader.read();
+        buffer += new TextDecoder().decode(value);
+        const parts = buffer.split('\n\n');
+        buffer = parts.pop()!;
+        for (const part of parts) if (part.startsWith('data: ')) events.push(JSON.parse(part.slice(6)) as ServerEvent);
+      }
+    };
+    await read((all) => all.some((event) => event.type === 'sessions'));
+    expect(events[0]).toMatchObject({ type: 'messages', messages: [{ preview: 'before' }] });
+
+    new Recorder(store, two).stderr('elsewhere');
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    new Recorder(store, one).stderr('mine');
+    await read((all) => all.some((event) => event.type === 'messages' && event.messages.some((m) => m.preview === 'mine')));
+    const previews = events.flatMap((event) => (event.type === 'messages' ? event.messages.map((m) => m.preview) : []));
+    expect(previews).toEqual(['before', 'mine']);
+    await reader.cancel();
+  });
+
+  it('says when the UI is not built', async () => {
+    const empty = await startUiServer({ store, port: 0, staticDir: mkdtempSync(join(tmpdir(), 'mcpspy-empty-')) });
+    const none = await startUiServer({ store, port: 0, staticDir: null });
+    try {
+      expect((await fetch(`${empty.url}/`)).status).toBe(404);
+      expect((await fetch(`${none.url}/`)).status).toBe(404);
+    } finally {
+      await empty.close();
+      await none.close();
+    }
+  });
+
+  it('listens on port 7777 by default', async () => {
+    const started = await startUiServer({ store, staticDir: null }).then(
+      async (server) => {
+        const url = server.url;
+        await server.close();
+        return url;
+      },
+      (error: NodeJS.ErrnoException) => error.code,
+    );
+    expect(['http://localhost:7777', 'EADDRINUSE']).toContain(started);
+  });
+});

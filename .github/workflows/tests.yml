@@ -56,8 +56,8 @@ jobs:
       # The packaged CLI starts, and proxies a real stdio server end to end.
       - name: Smoke Test
         run: |
-          node dist/cli.js --version
+          node dist/bin.js --version
           printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' \
-            | node dist/cli.js run --db smoke.db --name smoke -- node test/fixtures/echo-server.mjs
-          node dist/cli.js tail --db smoke.db | tee tail.txt
+            | node dist/bin.js run --db smoke.db --name smoke -- node test/fixtures/echo-server.mjs
+          node dist/bin.js tail --db smoke.db | tee tail.txt
           grep -q 'initialize ✓' tail.txt

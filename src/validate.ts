@@ -6,10 +6,12 @@ import type { Issue } from './types.js';
 
 export type { Issue } from './types.js';
 
-// ajv-formats is CommonJS; its default export arrives wrapped under NodeNext.
-const addFormats = ((addFormatsModule as unknown as { default?: typeof addFormatsModule }).default ?? addFormatsModule) as unknown as (
-  ajv: Ajv | Ajv2020,
-) => void;
+/** A CommonJS module's export: Node wraps it under default, bundlers may not. */
+export function interopDefault<T>(module: T): T {
+  return (module as { default?: T }).default ?? module;
+}
+
+const addFormats = interopDefault(addFormatsModule) as unknown as (ajv: Ajv | Ajv2020) => void;
 
 /**
  * JSON Schema validators for both dialects MCP servers use: draft-07 (what
@@ -26,15 +28,15 @@ class SchemaCompiler {
     addFormats(this.draft2020);
   }
 
-  compile(schema: unknown): ValidateFunction | Error {
+  compile(schema: Record<string, unknown>): ValidateFunction | Error {
     const key = JSON.stringify(schema);
     let compiled = this.cache.get(key);
     if (!compiled) {
-      const $schema = typeof schema === 'object' && schema !== null ? (schema as { $schema?: unknown }).$schema : undefined;
+      const $schema = schema.$schema;
       const ajv = typeof $schema === 'string' && /draft-0[4-7]/.test($schema) ? this.draft7 : this.draft2020;
       try {
         // Strip $schema so a draft URL either instance doesn't know can't break compilation.
-        const { $schema: _ignored, ...rest } = schema as Record<string, unknown>;
+        const { $schema: _ignored, ...rest } = schema;
         compiled = ajv.compile(rest);
       } catch (error) {
         compiled = error as Error;
@@ -173,7 +175,8 @@ function contentBlockIssues(block: unknown, path: string): Issue[] {
 
 /** Ajv errors as issues, with JSON pointers turned into the dotted paths used elsewhere. */
 function schemaIssues(validate: ValidateFunction, base: string): Issue[] {
-  return (validate.errors ?? []).map((failure) => {
+  // Only called after a failed validation, which always leaves errors.
+  return validate.errors!.map((failure) => {
     const segments = failure.instancePath
       .split('/')
       .slice(1)
@@ -185,7 +188,7 @@ function schemaIssues(validate: ValidateFunction, base: string): Issue[] {
         ? `unexpected property "${(failure.params as { additionalProperty: string }).additionalProperty}"`
         : failure.keyword === 'required'
           ? `missing required property "${(failure.params as { missingProperty: string }).missingProperty}"`
-          : (failure.message ?? failure.keyword);
+          : failure.message!;
     return error(path, detail);
   });
 }

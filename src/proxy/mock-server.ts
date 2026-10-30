@@ -30,7 +30,9 @@ export function runMockServer(options: MockServerOptions): Promise<{ sessionId: 
     started_at: Date.now(),
   });
   const recorder = new Recorder(store, sessionId);
+  // Replies waiting out a rule's delay; the session ends once they're sent.
   const timers = new Set<ReturnType<typeof setTimeout>>();
+  let finish: (() => void) | null = null;
 
   const reply = (id: unknown, body: { result: unknown } | { error: unknown }, rule: string | null) => {
     const line = JSON.stringify({ jsonrpc: '2.0', id, ...body });
@@ -86,6 +88,7 @@ export function runMockServer(options: MockServerOptions): Promise<{ sessionId: 
     const timer = setTimeout(() => {
       timers.delete(timer);
       reply(id, decision.reply, decision.rule);
+      if (timers.size === 0) finish?.();
     }, decision.delayMs);
     timers.add(timer);
   };
@@ -95,9 +98,12 @@ export function runMockServer(options: MockServerOptions): Promise<{ sessionId: 
     input.on('data', (chunk: Buffer) => splitter.push(chunk));
     input.on('end', () => {
       splitter.flush();
-      for (const timer of timers) clearTimeout(timer);
-      store.endSession(sessionId, { ended_at: Date.now(), exit_code: 0, exit_signal: null });
-      resolve({ sessionId });
+      // The agent may close stdin straight after its last request: answer it first.
+      finish = () => {
+        store.endSession(sessionId, { ended_at: Date.now(), exit_code: 0, exit_signal: null });
+        resolve({ sessionId });
+      };
+      if (timers.size === 0) finish();
     });
   });
 }

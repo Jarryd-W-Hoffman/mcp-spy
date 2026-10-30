@@ -211,7 +211,7 @@ describe('HTTP proxy', () => {
     expect(down.status).toBe(502);
     expect(await down.text()).toMatch(/could not reach .*ECONNREFUSED/);
     const [log] = store.messagesAfter(0, {}).filter((m) => m.kind === 'log');
-    expect(log!.payload).toMatch(/^\[http\] POST .* failed: ECONNREFUSED$/);
+    expect(log!.payload).toMatch(/^\[http\] POST .* failed: connect ECONNREFUSED /);
     fixture = await startHttpFixture(); // so afterEach can close something
   });
 });

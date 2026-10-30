@@ -128,3 +128,98 @@ describe('runStdioProxy', () => {
     expect(store.getSession(sessionId)!.ended_at).not.toBeNull();
   });
 });
+
+describe('runStdioProxy edge cases', () => {
+  const run = (store: Store, args: string[], options: Partial<Parameters<typeof runStdioProxy>[0]> = {}) => {
+    const input = new PassThrough();
+    const output = new PassThrough();
+    const errorOutput = new PassThrough();
+    let stdout = '';
+    let stderr = '';
+    output.on('data', (chunk) => (stdout += chunk));
+    errorOutput.on('data', (chunk) => (stderr += chunk));
+    const done = runStdioProxy({ command: process.execPath, args, store, input, output, errorOutput, forwardSignals: [], ...options });
+    return { input, done, stdout: () => stdout, stderr: () => stderr };
+  };
+
+  it('stops recording when the log breaks mid-session, and keeps proxying', async () => {
+    const store = new Store(':memory:');
+    const proxy = run(store, [server]);
+    const { vi } = await import('vitest');
+    const insert = vi.spyOn(store, 'insertMessage').mockImplementation(() => {
+      throw new Error('disk full');
+    });
+    proxy.input.write('{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}\n');
+    proxy.input.write('{"jsonrpc":"2.0","id":2,"method":"ping"}\n');
+    await vi.waitFor(() => expect(proxy.stdout()).toContain('"id":2'));
+    proxy.input.end();
+    await proxy.done;
+    insert.mockRestore();
+    expect(proxy.stderr().match(/recording stopped, still proxying: disk full/g)).toHaveLength(1);
+  });
+
+  it('reports a server killed by a signal', async () => {
+    const store = new Store(':memory:');
+    const proxy = run(store, ['-e', "process.kill(process.pid, 'SIGKILL')"]);
+    proxy.input.end();
+    const { sessionId, exitCode } = await proxy.done;
+    expect(exitCode).toBe(137);
+    expect(store.getSession(sessionId)).toMatchObject({ exit_code: null, exit_signal: 'SIGKILL' });
+  });
+
+  it('exits 126 when the command cannot be run', async () => {
+    const store = new Store(':memory:');
+    const proxy = run(store, [], { command: import.meta.dirname });
+    proxy.input.end();
+    expect((await proxy.done).exitCode).toBe(126);
+    expect(proxy.stderr()).toContain('[mcpspy] failed to start');
+  });
+
+  it('forwards signals to the server', async () => {
+    const store = new Store(':memory:');
+    const proxy = run(store, ['-e', "process.stdin.resume(); console.error('ready')"], { forwardSignals: ['SIGUSR2'] });
+    const { vi } = await import('vitest');
+    await vi.waitFor(() => expect(proxy.stderr()).toContain('ready'));
+    process.emit('SIGUSR2', 'SIGUSR2');
+    const { sessionId } = await proxy.done;
+    expect(store.getSession(sessionId)!.exit_signal).toBe('SIGUSR2');
+    expect(process.listenerCount('SIGUSR2')).toBe(0);
+  });
+
+  it('passes through lines mock rules cannot apply to', async () => {
+    const store = new Store(':memory:');
+    const { MockEngine } = await import('../src/mocks.js');
+    const mocks = new MockEngine(null, null, () => {}, { rules: [{ match: { method: 'never/called' }, result: {} }] });
+    const script = `
+      require('node:readline').createInterface({ input: process.stdin }).on('line', (line) => {
+        process.stdout.write('server says: ' + line + '\\n');
+        process.stdout.write('[1,2]\\n');
+        process.stdout.write('{"jsonrpc":"2.0","id":"x","method":"roots/list"}\\n');
+      });`;
+    const proxy = run(store, ['-e', script], { mocks });
+    proxy.input.write('not json\n');
+    proxy.input.write('[{"jsonrpc":"2.0","id":1,"method":"ping"}]\n');
+    proxy.input.write('{"jsonrpc":"2.0","method":"notifications/initialized"}\n');
+    proxy.input.write('{"jsonrpc":"2.0","id":"x","result":{}}\n');
+    proxy.input.end();
+    await proxy.done;
+    for (const line of ['server says: not json', 'server says: [{"jsonrpc":"2.0","id":1,"method":"ping"}]', 'server says: {"jsonrpc":"2.0","method":"notifications/initialized"}', '[1,2]', '"method":"roots/list"']) {
+      expect(proxy.stdout()).toContain(line);
+    }
+  });
+
+  it('drops writes to a server that has exited', async () => {
+    const store = new Store(':memory:');
+    const { MockEngine } = await import('../src/mocks.js');
+    const mocks = new MockEngine(null, null, () => {}, { rules: [] });
+    const proxy = run(store, ['-e', "require('node:fs').closeSync(0); setTimeout(() => {}, 400)"], { mocks });
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    // Spread out, so the first write's EPIPE has closed the pipe before the next.
+    for (let i = 0; i < 5; i++) {
+      proxy.input.write(`{"jsonrpc":"2.0","id":${i},"method":"ping","params":{"pad":"${'x'.repeat(5000)}"}}\n`);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    proxy.input.end();
+    expect((await proxy.done).exitCode).toBe(0);
+  });
+});

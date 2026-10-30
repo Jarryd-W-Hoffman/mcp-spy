@@ -87,3 +87,47 @@ describe('formatMessageLine', () => {
     expect(formatMessageLine(log, session, null, plain)).toBe('09:05:07.042 github     #5 stderr listening');
   });
 });
+
+describe('more formatting', () => {
+  it('colours only terminals without NO_COLOR', async () => {
+    const { colors, styleFor } = await import('../src/format.js');
+    const previous = process.env.NO_COLOR;
+    delete process.env.NO_COLOR;
+    try {
+      expect(styleFor({ isTTY: true })).toBe(colors);
+      expect(styleFor({})).toBe(plain);
+      process.env.NO_COLOR = '1';
+      expect(styleFor({ isTTY: true })).toBe(plain);
+    } finally {
+      if (previous === undefined) delete process.env.NO_COLOR;
+      else process.env.NO_COLOR = previous;
+    }
+    expect(colors.red('x')).toBe('\x1b[31mx\x1b[0m');
+  });
+
+  it('formats every size', () => {
+    expect(formatBytes(2048)).toBe('2.0KB');
+    expect(formatBytes(3 * 1024 * 1024)).toBe('3.0MB');
+    expect(formatBytes(5 * 1024 * 1024 * 1024)).toBe('5.00GB');
+  });
+
+  it('has no subject without a name or uri', () => {
+    expect(requestSubject('tools/call', '{"params":{"name":1}}')).toBeNull();
+    expect(requestSubject('resources/read', '{"params":{"uri":"file:///a"}}')).toBe('file:///a');
+    expect(requestSubject('resources/read', '{"params":{}}')).toBeNull();
+  });
+
+  it('summarises bare errors and tool errors without text', () => {
+    expect(errorSummary(row({ payload: '{"error":{}}' }))).toBe('?');
+    expect(errorSummary(row({ payload: '{"result":{"isError":true,"content":[]}}' }))).toBe('tool error');
+  });
+
+  it('formats invalid lines, long errors and several issues', () => {
+    const invalid = row({ kind: 'invalid', direction: 'server', method: null, rpc_id: null, problem: null, payload: 'x'.repeat(100) });
+    expect(formatMessageLine(invalid, undefined, null, plain)).toMatch(/← invalid {2}x{79}…$/);
+    const flagged = row({ kind: 'invalid', direction: 'client', method: null, rpc_id: null, problem: 'not json', payload: 'oops' });
+    expect(formatMessageLine(flagged, undefined, null, plain)).toMatch(/→ invalid not json oops$/);
+    const issues = row({ issues: JSON.stringify([{}, {}]) });
+    expect(formatMessageLine(issues, undefined, null, plain)).toContain('⚠ 2 issues');
+  });
+});

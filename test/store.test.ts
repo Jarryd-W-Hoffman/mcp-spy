@@ -54,3 +54,79 @@ describe('Store on a large log', () => {
     expect(plan).toContain(index);
   });
 });
+
+describe('Store failure handling', () => {
+  it('waits for a busy lock when switching to WAL, and gives up on other errors', async () => {
+    const { DatabaseSync } = await import('node:sqlite');
+    const { vi } = await import('vitest');
+    const exec = DatabaseSync.prototype.exec;
+    let busy = 2;
+    const spy = vi.spyOn(DatabaseSync.prototype, 'exec').mockImplementation(function (this: InstanceType<typeof DatabaseSync>, sql: string) {
+      if (sql === 'PRAGMA journal_mode = WAL' && busy-- > 0) throw Object.assign(new Error('database is locked'), { errcode: 5 });
+      return exec.call(this, sql);
+    });
+    try {
+      new Store(':memory:').close();
+      expect(busy).toBe(-1);
+
+      spy.mockImplementation(function (this: InstanceType<typeof DatabaseSync>, sql: string) {
+        if (sql === 'PRAGMA journal_mode = WAL') throw new Error('disk I/O error');
+        return exec.call(this, sql);
+      });
+      expect(() => new Store(':memory:')).toThrow('disk I/O error');
+
+      const now = vi.spyOn(Date, 'now');
+      now.mockReturnValueOnce(0).mockReturnValue(10_000);
+      spy.mockImplementation(function (this: InstanceType<typeof DatabaseSync>, sql: string) {
+        if (sql === 'PRAGMA journal_mode = WAL') throw Object.assign(new Error('database is locked'), { errcode: 517 });
+        return exec.call(this, sql);
+      });
+      expect(() => new Store(':memory:')).toThrow('database is locked');
+      now.mockRestore();
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('rolls back a failed schema setup or batch delete', async () => {
+    const { DatabaseSync } = await import('node:sqlite');
+    const { vi } = await import('vitest');
+    const exec = DatabaseSync.prototype.exec;
+    const executed: string[] = [];
+    const spy = vi.spyOn(DatabaseSync.prototype, 'exec').mockImplementation(function (this: InstanceType<typeof DatabaseSync>, sql: string) {
+      executed.push(sql);
+      if (sql.includes('CREATE TABLE')) throw new Error('schema broke');
+      return exec.call(this, sql);
+    });
+    try {
+      expect(() => new Store(':memory:')).toThrow('schema broke');
+      expect(executed.at(-1)).toBe('ROLLBACK');
+    } finally {
+      spy.mockRestore();
+    }
+
+    const store = new Store(':memory:');
+    const session = store.createSession({ name: null, transport: 'stdio', command: '[]', cwd: '/', pid: null, started_at: 0 });
+    const prepare = vi.spyOn(DatabaseSync.prototype, 'prepare').mockImplementation(() => {
+      throw new Error('delete broke');
+    });
+    try {
+      expect(() => store.deleteSessionBatch(session)).toThrow('delete broke');
+    } finally {
+      prepare.mockRestore();
+    }
+    expect(store.getSession(session)).toBeDefined();
+    store.close();
+  });
+
+  it('finds tool lists only from tools/list responses', () => {
+    const store = new Store(':memory:');
+    const session = store.createSession({ name: null, transport: 'stdio', command: '[]', cwd: '/', pid: null, started_at: 0 });
+    const ping = store.insertMessage(message(session, { kind: 'request', method: 'ping', rpc_id: '1' }));
+    expect(store.toolListFrom(ping)).toBeUndefined();
+    expect(store.toolListFrom(9999)).toBeUndefined();
+    const list = store.insertMessage(message(session, { direction: 'server', kind: 'response', method: 'tools/list', rpc_id: null, payload: '{"result":{"tools":[{"name":"a"}]}}' }));
+    expect(store.toolListFrom(list)).toMatchObject({ payload: '{"jsonrpc":"2.0","id":null,"result":{"tools":[{"name":"a"}]}}' });
+    store.close();
+  });
+});

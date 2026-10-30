@@ -102,3 +102,19 @@ describe('helpers', () => {
     expect(comparableBody('nope')).toBe('nope');
   });
 });
+
+describe('edge cases', () => {
+  it('prints undefined and keeps non-object values', () => {
+    expect(jsonLines(undefined)).toEqual(['undefined']);
+    expect(jsonLines([1, 'a'])).toEqual(['[', '  1,', '  "a"', ']']);
+  });
+
+  it('starts a hunk at line 0 when one side has no lines in it', () => {
+    expect(hunks(diffLines([], ['a']))[0]).toMatchObject({ beforeStart: 0, afterStart: 1 });
+    expect(hunks(diffLines(['a'], []))[0]).toMatchObject({ beforeStart: 1, afterStart: 0 });
+  });
+
+  it('compares a message without params, result or error as a whole', () => {
+    expect(comparableBody('{"jsonrpc":"2.0","id":1}')).toEqual({ jsonrpc: '2.0', id: 1 });
+  });
+});

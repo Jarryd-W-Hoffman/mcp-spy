@@ -135,7 +135,7 @@ export async function startUiServer(options: UiServerOptions): Promise<UiServer>
       json(res, 403, { error: 'mcpspy only answers requests addressed to localhost' });
       return;
     }
-    const url = new URL(req.url ?? '/', 'http://localhost');
+    const url = new URL(req.url!, 'http://localhost');
     if (req.method === 'POST' && url.pathname === '/api/replay') {
       void handleReplay(req, res);
       return;
@@ -176,8 +176,8 @@ export async function startUiServer(options: UiServerOptions): Promise<UiServer>
         json(res, 404, { error: 'no such message' });
         return;
       }
-      const request =
-        message.kind === 'request' ? message : message.request_id !== null ? (store.getMessage(message.request_id) ?? null) : null;
+      // Foreign keys keep a response's request.
+      const request = message.kind === 'request' ? message : message.request_id !== null ? store.getMessage(message.request_id)! : null;
       let response = message.kind === 'request' ? (store.responseTo(message.id) ?? null) : message.request_id !== null ? message : null;
       // For diffs: a tool list sent in pages is compared as a whole.
       if (url.searchParams.has('listing') && response?.method === 'tools/list') {
@@ -223,6 +223,9 @@ export async function startUiServer(options: UiServerOptions): Promise<UiServer>
     }
     const root = resolve(staticDir);
     let file = resolve(join(root, normalize(decodeURIComponent(pathname))));
+    // Defence in depth: URL parsing and normalize() already keep ".." from
+    // climbing out of the root, so no request reaches this.
+    /* v8 ignore next 4 */
     if (file !== root && !file.startsWith(root + sep)) {
       json(res, 403, { error: 'forbidden' });
       return;

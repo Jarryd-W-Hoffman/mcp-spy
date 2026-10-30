@@ -146,3 +146,66 @@ describe('rulesFromRecording', () => {
     expect(other.rule).toEqual({ name: 'resources/read (recorded #8)', match: { method: 'resources/read', params: { uri: 'file:///a' } }, error: { code: -32002, message: 'missing' } });
   });
 });
+
+describe('mock edge cases', () => {
+  it('rejects malformed files', () => {
+    expect(() => parseMockFile('{"rules":{}}')).toThrow('"rules" must be an array');
+    expect(() => parseMockFile('{"tools":{}}')).toThrow('"tools" must be an array');
+    expect(() => parseMockFile('{"tools":[null]}')).toThrow('tools[0] needs a name');
+    expect(() => parseMockFile('{"rules":[{"match":{},"error":{"code":1}}]}')).toThrow('rules[0]: error needs a numeric code and a message');
+  });
+
+  it('reloads quietly without a warning callback', async () => {
+    const path = join(mkdtempSync(join(tmpdir(), 'mcpspy-mocks-')), 'mocks.json');
+    writeFileSync(path, '{}');
+    const quiet = new MockEngine(path, null);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    writeFileSync(path, '{ broken');
+    expect(quiet.tools).toEqual([]);
+  });
+
+  it('patches only tool lists, and lists without tools', () => {
+    const mocked = engine({ tools: [{ name: 'fake', inputSchema: { type: 'object' } }] });
+    expect(mocked.patchToolList(null)).toBeNull();
+    expect(mocked.patchToolList({})).toEqual({ tools: [{ name: 'fake', inputSchema: { type: 'object' } }] });
+    expect(mocked.patchToolList({ tools: [{}, { name: 'fake' }] })).toEqual({ tools: [{}, { name: 'fake', inputSchema: { type: 'object' } }] });
+    expect(engine({}).tools).toEqual([]);
+  });
+
+  it('matches by arguments alone, and params on calls without them', () => {
+    const byArguments = engine({ rules: [{ match: { arguments: { q: 1 } }, text: 'x' }] });
+    expect(byArguments.decide('tools/call', { name: 't', arguments: { q: 1 } })).not.toBeNull();
+    expect(byArguments.decide('tools/call', { name: 't' })).toBeNull();
+    expect(byArguments.decide('tools/call', null)).toBeNull();
+    const byParams = engine({ rules: [{ match: { method: 'ping', params: {} }, result: {} }] });
+    expect(byParams.decide('ping', undefined)).not.toBeNull();
+  });
+
+  it('interpolates missing paths into nothing', () => {
+    expect(interpolate('{{params.a.b}}', { params: { a: 'text' } })).toBe('{{params.a.b}}');
+    expect(containsSubset([1], [1, 2])).toBe(false);
+    expect(containsSubset('x', [1])).toBe(false);
+  });
+
+  it('builds rules from requests without a response', async () => {
+    const { rulesFromRecording } = await import('../src/mocks.js');
+    expect(rulesFromRecording({ id: 3, method: 'tools/call', payload: '{"params":{"name":"t"}}' }, undefined, undefined).rule).toEqual({
+      name: 't (recorded #3)',
+      match: { tool: 't', arguments: {} },
+      result: {},
+    });
+    expect(rulesFromRecording({ id: 4, method: 'ping', payload: '{}' }, { payload: '{"jsonrpc":"2.0","id":1}' }, undefined).rule).toEqual({
+      name: 'ping (recorded #4)',
+      match: { method: 'ping', params: {} },
+      result: {},
+    });
+  });
+});
+
+describe('catch-all rules', () => {
+  it('match every method, and arrays item by item', () => {
+    expect(engine({ rules: [{ match: {}, result: {} }] }).decide('anything/at-all', {})).not.toBeNull();
+    expect(containsSubset([1, { a: 2 }], [1, { a: 2 }])).toBe(true);
+    expect(containsSubset([1, 2], [1, 3])).toBe(false);
+  });
+});
