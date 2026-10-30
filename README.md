@@ -598,6 +598,8 @@ Each request is matched to a session like this:
 | no header, on a legacy `/messages?sessionId=…` endpoint | the session whose event stream named that endpoint |
 | none of these | the latest session, for servers that never assign ids |
 
+A session ends when the agent sends `DELETE`, when its legacy event stream closes, or after 30 minutes with no traffic and no open stream. An agent can vanish without saying goodbye, so the idle limit stops the proxy holding on to its sessions forever. A request that names an ended session starts a new one.
+
 The legacy HTTP+SSE transport works differently. The client opens an event stream with a GET, and the server's first event names the URL to POST messages to. When that URL is absolute, the proxy rewrites it to point at itself, or the agent's messages would go straight past it.
 
 To make that possible, SSE responses are forwarded **one event at a time** rather than byte by byte. Each event is held until its terminating blank line, recorded, rewritten if it has to be, then sent. An event isn't usable by the client until that blank line anyway, so this adds no delay. JSON responses are buffered and forwarded whole. The proxy asks the server for uncompressed bodies so it can read them; if a server compresses anyway, the bytes pass through untouched and a decompressed copy is recorded.
