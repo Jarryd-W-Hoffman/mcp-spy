@@ -120,6 +120,16 @@ $ mcpspy tail -f
 
 The server's stderr is recorded alongside its messages, which often explains failures that look silent from the agent. So is anything a server prints to stdout that isn't JSON-RPC (a classic way to break a stdio server): it's forwarded as-is and logged as `invalid`.
 
+**Searching.** `mcpspy search <text>` finds every recorded message that contains the text, across all sessions, or in one with `--session <id>`. That covers tool arguments, results, errors and server stderr. Case is ignored, and text with quotes is found even though the log stores it JSON-escaped. Each match is shown with the text around it, and `mcpspy show <id>` opens one in full:
+
+```
+$ mcpspy search /etc/passwd
+20:52:08.761 fs         #7 → tools/call read_file id=2 112B
+    …"name":"read_file","arguments":{"path":"/etc/passwd"}}}
+```
+
+It lists the newest 50 matches (`-n` changes that) and exits with code 1 when nothing matches, like `grep`. `--json` writes one message per line.
+
 ### 🌐 Servers over HTTP
 
 `mcpspy proxy <url>` handles both HTTP transports: **Streamable HTTP**, and the older **HTTP+SSE**. Requests go to the same path on the real server, with their headers. Each MCP session is recorded as its own session, including the JSON-RPC in POST bodies, JSON responses, and every event on SSE streams: progress notifications, and requests the server makes mid-call, such as `roots/list`. HTTP errors, such as a 401, are logged with the session. A session ends when the client sends `DELETE` or closes the stream. `--mocks` works here too.
@@ -446,6 +456,7 @@ Patterns can't catch everything, such as a password in free text with nothing ar
 | `mcpspy tail [-f] [-n 50] [--session <id>] [--json]` | Print recorded messages; `-f` follows new ones, `--json` prints NDJSON rows. |
 | `mcpspy sessions [--limit 20]` | List recorded sessions with their status and message count. |
 | `mcpspy show <message-id>` | Pretty-print a message alongside its request or response. |
+| `mcpspy search <text> [--session <id>] [-n <50>]` | Find recorded messages that contain some text (see [Watching traffic](#-watching-traffic)). |
 | `mcpspy tokens [--session <id>] [--exact] [--model <id>]` | Context cost of a session's tools, call stats, and tool list changes. |
 | `mcpspy diff <id> <id>` | Diff two messages, or two requests and their responses. |
 | `mcpspy replay <id> [--args <json> \| --params <json>] [--repeat <n>] [-e K=V] [-H 'Name: value']` | Re-run a recorded request against a fresh server (or session) and diff the response. |
@@ -598,6 +609,8 @@ Each request is matched to a session like this:
 | no header, and it's an `initialize` | a new session, bound to the id in the server's reply |
 | no header, on a legacy `/messages?sessionId=…` endpoint | the session whose event stream named that endpoint |
 | none of these | the latest session, for servers that never assign ids |
+
+A session ends when the agent sends `DELETE`, when its legacy event stream closes, or after 30 minutes with no traffic and no open stream. An agent can vanish without saying goodbye, so the idle limit stops the proxy holding on to its sessions forever. A request that names an ended session starts a new one.
 
 The legacy HTTP+SSE transport works differently. The client opens an event stream with a GET, and the server's first event names the URL to POST messages to. When that URL is absolute, the proxy rewrites it to point at itself, or the agent's messages would go straight past it.
 

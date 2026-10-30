@@ -31,6 +31,11 @@ export interface HttpProxyOptions {
   /** What to remove from the record; built-in secret patterns by default. */
   redactor?: Redactor;
   warn?: (message: string) => void;
+  /**
+   * Sessions with no traffic and no open stream for this long are ended and
+   * forgotten, so agents that vanish without a DELETE don't pile up. 30 minutes by default.
+   */
+  sessionIdleMs?: number;
 }
 
 export interface HttpProxy {
@@ -47,6 +52,10 @@ interface Tracked {
   sessionId: number;
   recorder: Recorder;
   open: boolean;
+  /** When the agent or server last sent anything in this session. */
+  lastSeen: number;
+  /** Event streams open for this session; it never goes idle while one is. */
+  streams: number;
 }
 
 /**
@@ -69,7 +78,7 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
 
   const bySessionHeader = new Map<string, Tracked>();
   const byEndpoint = new Map<string, Tracked>();
-  const all: Tracked[] = [];
+  const all = new Set<Tracked>();
   /** Where traffic from servers that never assign a session id goes: the latest initialize. */
   let fallback: Tracked | null = null;
   /** Ids (per session) of tools/list and tools/call requests whose replies mocks or the policy may change. */
@@ -95,13 +104,19 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
       pid: null,
       started_at: Date.now(),
     });
-    const tracked = { sessionId, recorder: new Recorder(store, sessionId, undefined, redactor), open: true };
-    all.push(tracked);
+    const tracked = { sessionId, recorder: new Recorder(store, sessionId, undefined, redactor), open: true, lastSeen: Date.now(), streams: 0 };
+    all.add(tracked);
     return tracked;
   };
+  /** Ends a session in the log and forgets it, so a request naming it later starts a new one. */
   const end = (tracked: Tracked): void => {
     if (!tracked.open) return;
     tracked.open = false;
+    all.delete(tracked);
+    for (const map of [bySessionHeader, byEndpoint]) {
+      for (const [key, value] of map) if (value === tracked) map.delete(key);
+    }
+    if (fallback === tracked) fallback = null;
     record(() => store.endSession(tracked.sessionId, { ended_at: Date.now(), exit_code: null, exit_signal: null }));
   };
 
@@ -143,6 +158,7 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
       }
     }
     // A GET without a session is the legacy transport's event stream (or not MCP at all); tracked once we see SSE.
+    if (tracked) tracked.lastSeen = Date.now();
 
     let forwarded = body;
     if (tracked && method === 'POST' && text.trim() !== '') {
@@ -234,6 +250,13 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
         res.writeHead(up.statusCode!, responseHeaders);
         res.flushHeaders();
         const session = tracked;
+        if (session) {
+          session.streams++;
+          res.on('close', () => {
+            session.streams--;
+            session.lastSeen = Date.now();
+          });
+        }
         if (encoded) {
           // We asked for identity; if the server compressed anyway, forward as-is and read a decompressed copy.
           up.pipe(res);
@@ -281,11 +304,7 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
         }
         res.writeHead(status, responseHeaders).end(raw);
 
-        if (method === 'DELETE' && session && status < 300) {
-          end(session);
-          if (sessionHeader !== null) bySessionHeader.delete(sessionHeader);
-          if (fallback === session) fallback = null;
-        }
+        if (method === 'DELETE' && session && status < 300) end(session);
       });
     });
     upstreamReq.end(forwarded);
@@ -327,6 +346,7 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
       return null;
     }
     if (event.event !== 'message' || event.data === null || event.data.trim() === '') return null;
+    session.lastSeen = Date.now();
     const data = event.data;
     const shaped = shapeReply(session, parseJson(data));
     record(() => session.recorder.frame('server', shaped?.text ?? data, shaped?.rule ?? null));
@@ -375,6 +395,13 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
     server.listen(options.port ?? 7800, options.host ?? '127.0.0.1', () => resolve());
   });
   const { port } = server.address() as AddressInfo;
+  const idleMs = options.sessionIdleMs ?? 30 * 60_000;
+  const sweep = setInterval(
+    () => {
+      for (const tracked of all) if (tracked.streams === 0 && Date.now() - tracked.lastSeen > idleMs) end(tracked);
+    },
+    Math.min(idleMs, 60_000),
+  ).unref();
   const host = options.host ?? '127.0.0.1';
 
   return {
@@ -382,6 +409,7 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
     port,
     close: () =>
       new Promise((resolve) => {
+        clearInterval(sweep);
         for (const tracked of all) end(tracked);
         server.closeAllConnections();
         server.close(() => resolve());

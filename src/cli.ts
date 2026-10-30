@@ -10,6 +10,7 @@ import {
   formatClock,
   formatDuration,
   formatMessageLine,
+  matchSnippet,
   prettyPayload,
   requestSubject,
   styleFor,
@@ -47,6 +48,7 @@ Usage:
   mcpspy tail [-f] [-n <count>] [--session <id>] [--json] [--db <path>]
   mcpspy sessions [--limit <n>] [--db <path>]
   mcpspy show <message-id> [--db <path>]
+  mcpspy search <text> [--session <id>] [-n <50>] [--json] [--db <path>]
   mcpspy ui [--port <7777>] [--open] [--read-only] [--db <path>]
   mcpspy tokens [--session <id>] [--exact] [--model <id>] [--db <path>]
   mcpspy diff <message-id> <message-id> [--db <path>]
@@ -124,6 +126,8 @@ export async function main(argv: string[]): Promise<void> {
       return sessions(rest);
     case 'show':
       return show(rest);
+    case 'search':
+      return search(rest);
     case 'ui':
       return ui(rest);
     case 'tokens':
@@ -504,6 +508,49 @@ function sessions(argv: string[]): void {
         .filter(Boolean)
         .join('  ') + '\n',
     );
+  }
+}
+
+function search(argv: string[]): void {
+  const { values, positionals } = parseArgs({
+    args: argv,
+    allowPositionals: true,
+    options: {
+      session: { type: 'string' },
+      lines: { type: 'string', short: 'n', default: '50' },
+      json: { type: 'boolean' },
+      db: { type: 'string' },
+    },
+  });
+  const text = positionals.join(' ');
+  if (text.trim() === '') fail('search needs some text to look for');
+  const limit = Number.parseInt(values.lines, 10);
+  if (!Number.isSafeInteger(limit) || limit < 1) fail('-n must be a positive number');
+  const sessionId = values.session !== undefined ? parseId(values.session, '--session') : undefined;
+
+  const store = new Store(values.db);
+  const found = store.searchMessages(text, { sessionId, limit }).reverse();
+  const style = styleFor(process.stdout);
+  const sessions = new Map<number, SessionRow | undefined>();
+  for (const message of found) {
+    if (values.json) {
+      process.stdout.write(`${JSON.stringify(message)}\n`);
+      continue;
+    }
+    if (!sessions.has(message.session_id)) sessions.set(message.session_id, store.getSession(message.session_id));
+    const request = message.request_id !== null ? store.getMessage(message.request_id) : undefined;
+    const subject = request ? requestSubject(request.method, request.payload) : requestSubject(message.method, message.payload);
+    process.stdout.write(`${formatMessageLine(message, sessions.get(message.session_id), subject, style)}\n`);
+    process.stdout.write(`    ${matchSnippet(message.payload, text, style)}\n`);
+  }
+  store.close();
+
+  // Like grep: no match is exit code 1, so scripts can tell.
+  if (found.length === 0) {
+    process.stderr.write(`No recorded messages contain "${text}".\n`);
+    process.exitCode = 1;
+  } else if (found.length === limit) {
+    process.stderr.write(`Showing the newest ${limit} matches; -n shows more, \`mcpspy show <id>\` shows one in full.\n`);
   }
 }
 
