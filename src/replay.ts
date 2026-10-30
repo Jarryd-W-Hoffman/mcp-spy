@@ -2,7 +2,7 @@ import { Recorder } from './recorder.js';
 import { REDACTED } from './redact.js';
 import { HttpRpcClient } from './http-client.js';
 import { RpcClient, RpcError, StdioRpcClient, type JsonRpcReply } from './rpc-client.js';
-import type { Store } from './store.js';
+import { assertRecordedHere, type Store } from './store.js';
 import type { MessageRow, SessionRow } from './types.js';
 
 export interface ReplayOptions {
@@ -73,6 +73,11 @@ export async function replay(options: ReplayOptions): Promise<ReplayResult> {
   if (request.method === 'initialize') throw new ReplayError('initialize is sent automatically; replay a later request');
   const session = store.getSession(request.session_id)!;
   const originSessionId = session.replay_of ?? session.id;
+  try {
+    assertRecordedHere(store.getSession(originSessionId) ?? session, 'replay it');
+  } catch (error) {
+    throw new ReplayError((error as Error).message);
+  }
   // Replays are recorded as 'replay'; how to reach the server comes from the session they replay.
   const transport = store.getSession(originSessionId)?.transport ?? session.transport;
   if (!['stdio', 'mock', 'http', 'sse'].includes(transport)) {

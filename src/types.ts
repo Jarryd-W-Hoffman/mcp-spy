@@ -31,6 +31,8 @@ export interface SessionRow {
   env_keys: string | null;
   /** 1 once the session's messages have been validated. */
   checked: number;
+  /** 1 for sessions read in by `mcpspy import`: their command or URL came from a file, not from you. */
+  imported: number;
 }
 
 export interface MessageRow {
