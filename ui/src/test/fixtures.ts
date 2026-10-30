@@ -15,6 +15,7 @@ export const session = (patch: Partial<SessionSummary> = {}): SessionSummary => 
   replay_of: null,
   env_keys: null,
   checked: 1,
+  imported: 0,
   message_count: 2,
   ...patch,
 });

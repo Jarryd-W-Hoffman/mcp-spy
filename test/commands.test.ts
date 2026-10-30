@@ -952,6 +952,39 @@ describe('mcpspy policy suggest', () => {
   });
 });
 
+describe('mcpspy export and import', () => {
+  it('copies every session, or chosen ones, from one log to another', async () => {
+    const { db, sessionId } = await seeded();
+    const all = await cli(['export', '--db', db]);
+    expect(all.code).toBe(0);
+    expect(all.stderr).toMatch(/^Exported 1 session \(\d+ messages\)\. It holds tool arguments and results as recorded: check it before sharing\.\n$/);
+    const file = join(dir(), 'log.jsonl');
+    writeFileSync(file, all.stdout);
+
+    const other = tmpDb();
+    expect((await cli(['import', file, '--db', other])).stderr).toMatch(/^Imported 1 session \(\d+ messages\) as #1\.\n$/);
+    const piped = await cli(['import', '-', '--db', other], { stdin: all.stdout + all.stdout.split('\n').slice(1).join('\n') });
+    expect(piped.stderr).toMatch(/as #2–#3\.\n$/);
+    expect((await cli(['export', '--session', '1', '--db', other])).stdout.replace(/"(id|session_id|request_id)":\d+/g, '')).toBe(
+      (await cli(['export', '--session', String(sessionId), '--db', db])).stdout.replace(/"(id|session_id|request_id)":\d+/g, ''),
+    );
+  });
+
+  it('handles empty logs and exports', async () => {
+    const empty = await cli(['export', '--db', tmpDb()]);
+    expect([empty.stdout, empty.stderr]).toEqual(['{"mcpspy":"log","version":1}\n', expect.stringContaining('Exported 0 sessions (0 messages)')]);
+    expect((await cli(['import', '-', '--db', tmpDb()], { stdin: empty.stdout })).stderr).toBe('Imported 0 sessions (0 messages).\n');
+  });
+
+  it('explains bad arguments and bad files', async () => {
+    expect((await cli(['export', '--session', '4', '--db', tmpDb()])).stderr).toContain('no session with id 4');
+    expect((await cli(['import', '--db', tmpDb()])).stderr).toContain('import takes one file (or - for stdin)');
+    expect((await cli(['import', '/no/such/file', '--db', tmpDb()])).stderr).toContain('no such file: /no/such/file');
+    const bad = await cli(['import', '-', '--db', tmpDb()], { stdin: 'hello\n' });
+    expect([bad.code, bad.stderr]).toEqual([2, 'mcpspy: import failed, nothing imported: line 1 is not JSON\n']);
+  });
+});
+
 describe('mcpspy wrap and unwrap', () => {
   const config = (text: string) => {
     const path = join(dir(), 'mcp.json');
