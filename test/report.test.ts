@@ -69,3 +69,29 @@ describe('toolListChanges', () => {
     expect(stableStringify({ b: 1, a: [{ d: 1, c: 2 }] })).toBe('{"a":[{"c":2,"d":1}],"b":1}');
   });
 });
+
+describe('sparse tool lists', () => {
+  it('copes with lists that have no tools or costs', () => {
+    expect(toolListChanges('{"result":{}}', '{"result":{"tools":[{"name":"a"}]}}', null, null)).toEqual([{ name: 'a', change: 'added', fields: [], tokenDelta: 0 }]);
+    expect(toolListChanges('{"result":{"tools":[{"name":"a"}]}}', '{}', null, null)).toEqual([{ name: 'a', change: 'removed', fields: [], tokenDelta: -0 }]);
+  });
+
+  it('stringifies undefined and arrays stably', () => {
+    expect(stableStringify(undefined)).toBe('undefined');
+    expect(stableStringify([{ b: 1, a: 2 }])).toBe('[{"a":2,"b":1}]');
+  });
+
+  it('reports a session whose tool list and replies have no token counts', () => {
+    const store = new Store(':memory:');
+    const session = store.createSession({ name: 'x', transport: 'stdio', command: '[]', cwd: '/', pid: null, started_at: 1 });
+    const base = { session_id: session, ts: 1, size: 1, problem: null, latency_ms: null, issues: null, token_detail: null };
+    const list = store.insertMessage({ ...base, direction: 'client', kind: 'request', method: 'tools/list', rpc_id: '1', payload: '{"jsonrpc":"2.0","id":1,"method":"tools/list"}', request_id: null, tokens: null });
+    store.insertMessage({ ...base, direction: 'server', kind: 'response', method: 'tools/list', rpc_id: '1', payload: '{"jsonrpc":"2.0","id":1,"result":{"tools":[]}}', request_id: list, tokens: 0 });
+    const call = store.insertMessage({ ...base, direction: 'client', kind: 'request', method: 'tools/call', rpc_id: '2', payload: '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"t"}}', request_id: null, tokens: null });
+    store.insertMessage({ ...base, direction: 'server', kind: 'response', method: 'tools/call', rpc_id: '2', payload: '{"jsonrpc":"2.0","id":2,"result":{}}', request_id: call, tokens: null });
+    const report = toolsReport(store, session);
+    expect(report.definitions!.tools).toEqual([]);
+    expect(report.calls).toEqual([expect.objectContaining({ name: 't', totalTokens: 0, maxTokens: 0 })]);
+    store.close();
+  });
+});

@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { Store } from '../src/store.js';
 
-const cli = join(import.meta.dirname, '..', 'src', 'cli.ts');
+const cli = join(import.meta.dirname, '..', 'src', 'bin.ts');
 const echoServer = join(import.meta.dirname, 'fixtures', 'echo-server.mjs');
 
 function run(args: string[], input = ''): Promise<{ code: number | null; stdout: string; stderr: string }> {

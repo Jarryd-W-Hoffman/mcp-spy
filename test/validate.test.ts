@@ -103,3 +103,59 @@ describe('SessionValidator.toolResult', () => {
     expect(v.toolResult('weather', { content, isError: true })).toEqual([]);
   });
 });
+
+describe('more validation', () => {
+  it('unwraps CommonJS default exports', async () => {
+    const { interopDefault } = await import('../src/validate.js');
+    const fn = () => {};
+    expect(interopDefault({ default: fn })).toBe(fn);
+    expect(interopDefault(fn)).toBe(fn);
+  });
+
+  it('flags malformed tools and skips argument checks it cannot do', () => {
+    const validator = new SessionValidator();
+    expect(validator.toolList({ tools: ['nope', { name: 'a', inputSchema: 'x' }, { name: 'b', inputSchema: { type: 'object', properties: 5 } }] })).toEqual([
+      { severity: 'error', path: 'result.tools[0]', message: 'tool must be an object with a string name' },
+      { severity: 'error', path: 'result.tools[name="a"].inputSchema', message: 'schema must be a JSON Schema object with type "object"' },
+      { severity: 'error', path: 'result.tools[name="b"].inputSchema', message: expect.stringMatching(/^invalid JSON Schema: /) },
+    ]);
+    expect(validator.toolCall({ name: 'a', arguments: { anything: 1 } })).toEqual([]);
+    expect(validator.toolCall({ name: 'b' })).toEqual([]);
+  });
+
+  it('checks every kind of content block', () => {
+    const validator = new SessionValidator();
+    expect(validator.toolResult(null, 'x')).toEqual([{ severity: 'error', path: 'result', message: 'tools/call result must be an object' }]);
+    const issues = validator.toolResult(null, {
+      content: [
+        7,
+        { type: 'resource_link', uri: 'file:///a' },
+        { type: 'resource', resource: 'x' },
+        { type: 'resource', resource: { uri: 'file:///b' } },
+        { type: 'resource', resource: { text: 'hi' } },
+        { type: 'resource', resource: { uri: 'file:///c', blob: 'AA==' } },
+      ],
+    });
+    expect(issues.map((issue) => `${issue.path}: ${issue.message}`)).toEqual([
+      'result.content[0]: content block must be an object',
+      'result.content[1].name: resource_link content needs a string "name"',
+      'result.content[2].resource: resource content needs a object "resource"',
+      'result.content[3].resource: embedded resource needs text or blob',
+      'result.content[4].resource.uri: embedded resource needs a uri',
+    ]);
+  });
+
+  it('points into arrays by index', () => {
+    const validator = new SessionValidator();
+    validator.toolList({ tools: [{ name: 'list', inputSchema: { type: 'object', properties: { items: { type: 'array', items: { type: 'string' } } } } }] });
+    expect(validator.toolCall({ name: 'list', arguments: { items: ['a', 2] } })).toEqual([
+      { severity: 'error', path: 'params.arguments.items[1]', message: 'must be string' },
+    ]);
+  });
+
+  it('ignores unreadable payloads', async () => {
+    const { calledTool, checkMessage } = await import('../src/validate.js');
+    expect(checkMessage(new SessionValidator(), { direction: 'client', kind: 'request', method: 'tools/call', payload: '{' }, null)).toEqual([]);
+    expect(calledTool('{')).toBeNull();
+  });
+});

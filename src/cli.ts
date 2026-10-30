@@ -1,8 +1,6 @@
-#!/usr/bin/env node
 import { spawn } from 'node:child_process';
 import { existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { comparableBody, diffLines, hunks, jsonLines } from './diff.js';
 import {
@@ -31,6 +29,7 @@ import { addCases, emptySuite, parseSuite, runSuite, updateExpectations, type Su
 import { formatTokens } from './tokens.js';
 import { defaultDbPath, Store, type MessageRow, type SessionRow } from './store.js';
 import type { Issue } from './types.js';
+import { resolveUiDir } from './ui-dir.js';
 import { unwrapConfig, wrapConfig, type WrapChange } from './wrap.js';
 
 const HELP = `mcpspy - see what your AI agent and its MCP servers say to each other
@@ -93,7 +92,8 @@ function fail(message: string): never {
   process.exit(2);
 }
 
-async function main(argv: string[]): Promise<void> {
+/** Runs one mcpspy command. bin.ts calls it through start(); tests call it directly. */
+export async function main(argv: string[]): Promise<void> {
   const [first, ...rest] = argv;
 
   switch (first) {
@@ -296,7 +296,8 @@ function parseMockFileOrFail(path: string): MockFile {
 function recordedTool(store: Store, sessionId: number, name: string): MockTool | undefined {
   const list = store.latestToolList(sessionId);
   if (!list) return undefined;
-  const tools = (JSON.parse(list.payload) as { result?: { tools?: MockTool[] } }).result?.tools ?? [];
+  // Listings always hold a tools array, joined from every page.
+  const tools = (JSON.parse(list.payload) as { result: { tools: MockTool[] } }).result.tools;
   return tools.find((tool) => tool.name === name);
 }
 
@@ -333,8 +334,9 @@ async function tail(argv: string[]): Promise<void> {
     }
     if (message.request_id === null) return null;
     if (!subjectCache.has(message.request_id)) {
-      const request = store.getMessage(message.request_id);
-      subjectCache.set(message.request_id, request ? requestSubject(request.method, request.payload) : null);
+      // Foreign keys keep the request while its response exists.
+      const request = store.getMessage(message.request_id)!;
+      subjectCache.set(message.request_id, requestSubject(request.method, request.payload));
     }
     return subjectCache.get(message.request_id) ?? null;
   };
@@ -360,11 +362,7 @@ async function tail(argv: string[]): Promise<void> {
     return;
   }
 
-  // New sessions start while we follow; forget cached misses so they get names.
-  const timer = setInterval(() => {
-    for (const [id, session] of sessionCache) if (!session) sessionCache.delete(id);
-    drain();
-  }, 200);
+  const timer = setInterval(drain, 200);
   process.once('SIGINT', () => {
     clearInterval(timer);
     store.close();
@@ -495,12 +493,12 @@ async function tokens(argv: string[]): Promise<void> {
       const counter = new ExactCounter(values.model);
       if (report.definitions) {
         const cached = store.exactCount(report.definitions.messageId, values.model);
-        const exact = cached
-          ? (JSON.parse(cached.detail!) as Awaited<ReturnType<InstanceType<typeof ExactCounter>['toolDefinitions']>>)
-          : await counter.toolDefinitions(
-              (JSON.parse(store.latestToolList(session.id)!.payload) as { result: { tools: unknown[] } }).result.tools,
-            );
-        if (!cached) {
+        let exact: Awaited<ReturnType<InstanceType<typeof ExactCounter>['toolDefinitions']>>;
+        if (cached) exact = JSON.parse(cached.detail!) as typeof exact;
+        else {
+          exact = await counter.toolDefinitions(
+            (JSON.parse(store.latestToolList(session.id)!.payload) as { result: { tools: unknown[] } }).result.tools,
+          );
           store.saveExactCount({ message_id: report.definitions.messageId, model: values.model, tokens: exact.total, detail: JSON.stringify(exact) });
         }
         definitionCosts = exact.tools;
@@ -511,7 +509,8 @@ async function tokens(argv: string[]): Promise<void> {
       const largest = new Map<string, MessageRow & { request_payload: string | null }>();
       for (const call of store.toolCalls(session.id)) {
         const name = (call.request_payload && requestSubject('tools/call', call.request_payload)) ?? '(unknown)';
-        if ((call.tokens ?? 0) > (largest.get(name)?.tokens ?? -1)) largest.set(name, call);
+        // backfillTokens has costed every reply.
+        if (call.tokens! > (largest.get(name)?.tokens ?? -1)) largest.set(name, call);
       }
       for (const [name, call] of largest) {
         const cached = store.exactCount(call.id, values.model);
@@ -687,8 +686,9 @@ async function replayCommand(argv: string[]): Promise<void> {
     }
     throw error;
   }
+  // replay() succeeded, so the request exists.
   const original = result.original.responseId !== null ? store.getMessage(result.original.responseId) : undefined;
-  const session = store.getSession(store.getMessage(messageId)!.session_id)!;
+  const session = store.getSession(request!.session_id)!;
   store.close();
 
   if (values.json) {
@@ -696,7 +696,7 @@ async function replayCommand(argv: string[]): Promise<void> {
     return;
   }
 
-  const subject = request ? requestSubject(request.method, request.payload) : null;
+  const subject = requestSubject(request!.method, request!.payload);
   const out = (line = '') => process.stdout.write(`${line}\n`);
   out(
     `Replayed ${[result.original.method, subject].filter(Boolean).join(' ')} ${style.dim(`(#${messageId} from ${session.name ?? 'session'} #${session.id})`)} → session #${result.sessionId}`,
@@ -796,7 +796,7 @@ async function suiteCommand(argv: string[]): Promise<void> {
       : (result) => {
           const latency = result.latencyMs !== null ? style.dim(` ${formatDuration(result.latencyMs)}`) : '';
           if (result.status === 'pass') out(`${style.green('✓')} ${result.name}${latency}`);
-          else if (result.status === 'error') out(`${style.red('!')} ${result.name}  ${style.red(result.error ?? 'error')}`);
+          else if (result.status === 'error') out(`${style.red('!')} ${result.name}  ${style.red(result.error!)}`);
           else {
             out(`${style.red('✗')} ${result.name}${latency}`);
             for (const change of result.changes.slice(0, 10)) {
@@ -1011,8 +1011,9 @@ function validate(argv: string[]): void {
     if (!sessions.has(message.session_id)) sessions.set(message.session_id, store.getSession(message.session_id));
     if (message.request_id !== null && !requests.has(message.request_id)) requests.set(message.request_id, store.getMessage(message.request_id));
     const session = sessions.get(message.session_id);
-    const request = message.request_id !== null ? requests.get(message.request_id) : message;
-    const subject = request ? requestSubject(request.method, request.payload) : null;
+    // Foreign keys keep a response's request.
+    const request = message.request_id !== null ? requests.get(message.request_id)! : message;
+    const subject = requestSubject(request.method, request.payload);
     const what = message.direction === 'client' ? 'request' : 'response';
 
     out(
@@ -1069,15 +1070,6 @@ async function ui(argv: string[]): Promise<void> {
   process.once('SIGTERM', stop);
 }
 
-/** dist/ui next to the compiled CLI, or the build output when running from source. */
-function resolveUiDir(): string | null {
-  for (const candidate of ['./ui/', '../dist/ui/']) {
-    const dir = fileURLToPath(new URL(candidate, import.meta.url));
-    if (existsSync(`${dir}index.html`)) return dir;
-  }
-  return null;
-}
-
 function openBrowser(url: string): void {
   const command = process.platform === 'darwin' ? 'open' : process.platform === 'win32' ? 'explorer' : 'xdg-open';
   spawn(command, [url], { stdio: 'ignore', detached: true }).on('error', () => {}).unref();
@@ -1089,13 +1081,16 @@ function parseId(value: string, what: string): number {
   return id;
 }
 
-// Output piped into head, less, … that exits early: stop quietly instead of crashing.
-process.stdout.on('error', (error: NodeJS.ErrnoException) => {
-  if (error.code === 'EPIPE') process.exit(0);
-  throw error;
-});
+/** The process entry point: runs a command and turns errors into an exit code. */
+export function start(argv: string[]): Promise<void> {
+  // Output piped into head, less, … that exits early: stop quietly instead of crashing.
+  process.stdout.on('error', (error: NodeJS.ErrnoException) => {
+    if (error.code === 'EPIPE') process.exit(0);
+    throw error;
+  });
 
-main(process.argv.slice(2)).catch((error: unknown) => {
-  process.stderr.write(`mcpspy: ${error instanceof Error ? error.message : String(error)}\n`);
-  process.exit(1);
-});
+  return main(argv).catch((error: unknown) => {
+    process.stderr.write(`mcpspy: ${error instanceof Error ? error.message : String(error)}\n`);
+    process.exit(1);
+  });
+}

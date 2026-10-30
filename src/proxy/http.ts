@@ -102,10 +102,10 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
   };
 
   const server = createServer((req, res) => {
+    // Only reading the body or starting the upstream request can throw, both before any reply.
     void handle(req, res).catch((error: Error) => {
       warn(`proxy error: ${error.message}`);
-      if (!res.headersSent) res.writeHead(502, { 'content-type': 'text/plain' });
-      res.end();
+      res.writeHead(502, { 'content-type': 'text/plain' }).end();
     });
   });
 
@@ -116,9 +116,10 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
       return;
     }
 
-    const target = new URL(req.url ?? '/', upstream);
+    // Node sets url and method on every request a server receives.
+    const target = new URL(req.url!, upstream);
     const local = `${target.pathname}${target.search}`;
-    const method = req.method ?? 'GET';
+    const method = req.method!;
     const body = method === 'GET' || method === 'HEAD' || method === 'DELETE' ? Buffer.alloc(0) : await readAll(req);
     const text = body.toString('utf8');
     const parsed = parseJson(text);
@@ -180,13 +181,13 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
       if (!res.writableFinished) upstreamReq.destroy();
     });
     upstreamReq.on('error', (error) => {
-      const reason = (error as NodeJS.ErrnoException).code ?? error.message;
+      const reason = error.message;
       if (tracked) {
         const session = tracked;
         record(() => session.recorder.stderr(`[http] ${method} ${target.href} failed: ${reason}`));
       }
-      if (!res.headersSent) res.writeHead(502, { 'content-type': 'text/plain' }).end(`mcpspy could not reach ${upstream.origin}: ${reason}`);
-      else res.destroy();
+      // Requests only fail before a response, so nothing has been sent yet.
+      res.writeHead(502, { 'content-type': 'text/plain' }).end(`mcpspy could not reach ${upstream.origin}: ${reason}`);
     });
     upstreamReq.on('response', (up) => {
       const assigned = header(up.headers, 'mcp-session-id');
@@ -201,9 +202,13 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
       const encoded = encoding !== null && encoding !== 'identity';
 
       if (type.startsWith('text/event-stream')) {
-        if (!tracked && method === 'GET' && up.statusCode === 200) tracked = track('sse');
+        if (!tracked && method === 'GET' && up.statusCode === 200) {
+          // With a session id, a Streamable HTTP session that began before the proxy; without, the legacy transport.
+          tracked = track(sessionHeader !== null ? 'http' : 'sse');
+          if (sessionHeader !== null) bySessionHeader.set(sessionHeader, tracked);
+        }
         delete responseHeaders['content-length'];
-        res.writeHead(up.statusCode ?? 502, responseHeaders);
+        res.writeHead(up.statusCode!, responseHeaders);
         res.flushHeaders();
         const session = tracked;
         if (encoded) {
@@ -234,7 +239,8 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
       up.on('error', () => res.destroy());
       up.on('end', () => {
         let raw = Buffer.concat(chunks);
-        const status = up.statusCode ?? 502;
+        // Responses always carry a status line.
+        const status = up.statusCode!;
         const session = tracked;
         const decoded = encoded ? null : raw.toString('utf8');
         const reply = decoded !== null && type.includes('json') ? parseJson(decoded) : undefined;
@@ -249,7 +255,7 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
           record(() => session.recorder.frame('server', recorded, patched !== null ? 'mock tools' : mockedBy));
         } else if (session && status >= 400) {
           const detail = decoded !== null ? decoded.trim().slice(0, 500) : `${raw.length} bytes, ${encoding}`;
-          record(() => session.recorder.stderr(`[http] ${status} ${up.statusMessage ?? ''} for ${method} ${local}${detail ? `: ${detail}` : ''}`));
+          record(() => session.recorder.stderr(`[http] ${status} ${up.statusMessage} for ${method} ${local}${detail ? `: ${detail}` : ''}`));
         }
         res.writeHead(status, responseHeaders).end(raw);
 
@@ -323,9 +329,10 @@ function endToEnd(headers: IncomingHttpHeaders, name: string): boolean {
   return connection === null || !connection.split(',').some((listed) => listed.trim().toLowerCase() === name);
 }
 
+/** A single-valued header (Node only gives arrays for set-cookie, which this never reads). */
 function header(headers: IncomingHttpHeaders, name: string): string | null {
   const value = headers[name];
-  return typeof value === 'string' ? value : Array.isArray(value) ? (value[0] ?? null) : null;
+  return typeof value === 'string' ? value : null;
 }
 
 function isLoopbackOrigin(origin: string): boolean {

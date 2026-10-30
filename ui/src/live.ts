@@ -49,7 +49,8 @@ export function useLiveData(sessionId: number | null = null): LiveSessions {
   const [state, setState] = useState<LiveData>({ messages: [], sessions: [], connection: 'connecting' });
   // Pages of sessions older than the newest ones, which the server streams.
   const [older, setOlder] = useState<{ sessions: SessionSummary[]; more: boolean }>({ sessions: [], more: true });
-  const mergeRef = useRef<(incoming: MessageSummary[]) => void>(() => {});
+  // Set by the first effect, which runs before the selected session's load can settle.
+  const mergeRef = useRef<(incoming: MessageSummary[]) => void>(null!);
   const sessionRef = useRef(sessionId);
   sessionRef.current = sessionId;
 

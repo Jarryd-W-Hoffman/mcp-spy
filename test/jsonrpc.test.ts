@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { classifyFrame } from '../src/jsonrpc.js';
+import { classifyFrame, requestsLaterPage } from '../src/jsonrpc.js';
 
 describe('classifyFrame', () => {
   it('classifies requests', () => {
@@ -33,5 +33,18 @@ describe('classifyFrame', () => {
     expect(classifyFrame('{"id":1,"method":"x"}')[0]?.problem).toMatch(/jsonrpc/);
     expect(classifyFrame('{"jsonrpc":"2.0","id":{},"method":"x"}')[0]?.problem).toMatch(/id/);
     expect(classifyFrame('[]')[0]?.problem).toBe('empty batch');
+  });
+});
+
+describe('more invalid messages', () => {
+  it('rejects values that are not objects, and objects that are nothing', () => {
+    expect(classifyFrame('5')[0]).toMatchObject({ kind: 'invalid', problem: 'message is not an object' });
+    expect(classifyFrame('{"jsonrpc":"2.0","id":1}')[0]).toMatchObject({ kind: 'invalid', problem: 'neither a request, notification nor response' });
+  });
+
+  it('treats an unparseable request as asking for the first page', () => {
+    expect(requestsLaterPage('{')).toBe(false);
+    expect(requestsLaterPage(null)).toBe(false);
+    expect(requestsLaterPage('{"params":{"cursor":"x"}}')).toBe(true);
   });
 });

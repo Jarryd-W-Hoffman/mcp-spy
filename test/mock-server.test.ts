@@ -56,3 +56,24 @@ describe('mock serve', () => {
     store.close();
   });
 });
+
+describe('mock serve edge cases', () => {
+  it('ignores unreadable lines and notifications, drops by rule and passes on instructions', async () => {
+    const store = new Store(':memory:');
+    const input = new PassThrough();
+    const output = new PassThrough();
+    let text = '';
+    output.on('data', (chunk: Buffer) => (text += chunk.toString()));
+    const mocks = new MockEngine(null, null, () => {}, { server: { instructions: 'Be nice' }, rules: [{ match: { tool: 'gone' }, drop: true }] });
+    const done = runMockServer({ mocks, path: '/x.json', store, input, output });
+    input.write('not json\n');
+    input.write('{"jsonrpc":"2.0","method":"notifications/initialized"}\n');
+    input.write('{"jsonrpc":"2.0","id":1,"method":"initialize"}\n');
+    input.write('{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"gone"}}\n');
+    input.end();
+    await done;
+    const lines = text.trim().split('\n').map((line) => JSON.parse(line) as Record<string, unknown>);
+    expect(lines).toEqual([{ jsonrpc: '2.0', id: 1, result: { protocolVersion: '2025-06-18', capabilities: { tools: { listChanged: false } }, serverInfo: { name: 'mcpspy-mock', version: '0.0.0' }, instructions: 'Be nice' } }]);
+    store.close();
+  });
+});

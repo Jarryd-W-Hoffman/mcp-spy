@@ -123,6 +123,7 @@ function ChangeList({ changes }: { changes: JsonChange[] }) {
 }
 
 function preview(value: unknown): string {
-  const text = JSON.stringify(value) ?? 'undefined';
+  // Values come from parsed JSON, so they always serialise.
+  const text = JSON.stringify(value)!;
   return text.length > 40 ? `${text.slice(0, 39)}…` : text;
 }

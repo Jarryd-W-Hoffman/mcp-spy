@@ -93,3 +93,22 @@ describe('recording with redaction', () => {
     await expect(replay({ store, messageId: second! })).rejects.toThrow('pass its arguments with --args');
   });
 });
+
+describe('Redactor options', () => {
+  it('leaves payloads alone with nothing to redact', () => {
+    const redactor = new Redactor({ builtIn: false });
+    expect(redactor.json('{"password":"hunter2"}')).toBe('{"password":"hunter2"}');
+  });
+
+  it('keeps a global flag a pattern already has', () => {
+    const redactor = new Redactor({ builtIn: false, patterns: [/x\d/g] });
+    expect(redactor.json('{"a":"x1 x2"}')).toBe(`{"a":"${REDACTED} ${REDACTED}"}`);
+  });
+});
+
+describe('pattern flags', () => {
+  it('adds the global flag to a pattern without it', () => {
+    const redactor = new Redactor({ builtIn: false, patterns: [/x\d/i] });
+    expect(redactor.json('{"a":"X1 x2"}')).toBe(`{"a":"${REDACTED} ${REDACTED}"}`);
+  });
+});

@@ -1,6 +1,7 @@
 import type Anthropic from '@anthropic-ai/sdk';
 import { describe, expect, it } from 'vitest';
-import { ExactCounter, toResultContent } from '../src/exact.js';
+import AnthropicSdk from '@anthropic-ai/sdk';
+import { describeApiError, ExactCounter, toResultContent } from '../src/exact.js';
 
 /** A fake client whose count is the length of the request's JSON, so differences are predictable. */
 function fakeClient() {
@@ -60,5 +61,36 @@ describe('toResultContent', () => {
       { type: 'text', text: '{"type":"image","mimeType":"image/bmp","data":"AAAA"}' },
       { type: 'text', text: 'body' },
     ]);
+  });
+});
+
+describe('ExactCounter edge cases', () => {
+  it('uses the baseline for a single tool, and builds its own client by default', async () => {
+    const { client } = fakeClient();
+    const result = await new ExactCounter('m', client).toolDefinitions([{ name: 'only' }]);
+    expect(result.tools).toEqual([{ name: 'only', tokens: 140 }]);
+    expect(new ExactCounter('m')).toBeInstanceOf(ExactCounter);
+  });
+
+  it('converts text without text and resources without text', () => {
+    expect(toResultContent([{ type: 'text' }, { type: 'resource', resource: { blob: 'AA==' } }])).toEqual([
+      { type: 'text', text: '' },
+      { type: 'text', text: '{"type":"resource","resource":{"blob":"AA=="}}' },
+    ]);
+  });
+});
+
+describe('describeApiError', () => {
+  const api = (status: number | undefined) => AnthropicSdk.APIError.generate(status, { error: { message: 'nope' } }, 'nope', new Headers());
+
+  it('explains each kind of failure', () => {
+    expect(describeApiError(api(401))).toBe('authentication failed: set ANTHROPIC_API_KEY or run `ant auth login`');
+    expect(describeApiError(api(404))).toMatch(/^model not found: /);
+    expect(describeApiError(api(429))).toBe('rate limited by the count_tokens endpoint; try again shortly');
+    expect(describeApiError(api(500))).toMatch(/^API error 500: /);
+    expect(describeApiError(new AnthropicSdk.APIError(undefined, undefined, 'offline', undefined))).toBe('API error : offline');
+    expect(describeApiError(new AnthropicSdk.AnthropicError('no key'))).toBe('no key\nSet ANTHROPIC_API_KEY or run `ant auth login`.');
+    expect(describeApiError(new Error('plain'))).toBe('plain');
+    expect(describeApiError('text')).toBe('text');
   });
 });

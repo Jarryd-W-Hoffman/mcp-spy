@@ -14,7 +14,7 @@
   },
   "type": "module",
   "bin": {
-    "mcpspy": "dist/cli.js"
+    "mcpspy": "dist/bin.js"
   },
   "files": [
     "dist"
@@ -24,10 +24,11 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.build.json && vite build",
-    "dev": "tsx src/cli.ts",
+    "dev": "tsx src/bin.ts",
     "dev:ui": "vite",
     "typecheck": "tsc --noEmit && tsc --noEmit -p ui",
     "test": "vitest run",
+    "test:coverage": "vitest run --coverage",
     "test:watch": "vitest",
     "bench": "node bench/bench.mjs"
   },
@@ -38,10 +39,14 @@
   },
   "devDependencies": {
     "@modelcontextprotocol/sdk": "1.32.2",
+    "@testing-library/dom": "^10.4.2",
+    "@testing-library/react": "^16.3.3",
     "@types/node": "^26.6.5",
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
     "@vitejs/plugin-react": "^6.1.2",
+    "@vitest/coverage-v8": "^5.0.5",
+    "jsdom": "^27.4.0",
     "react": "^19.3.1",
     "react-dom": "^19.3.1",
     "tsx": "^4.23.15",

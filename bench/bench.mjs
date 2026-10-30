@@ -9,7 +9,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 
-const cli = process.argv[2] ?? join(import.meta.dirname, '..', 'dist', 'cli.js');
+const cli = process.argv[2] ?? join(import.meta.dirname, '..', 'dist', 'bin.js');
 const dir = mkdtemp();
 function mkdtemp() {
   return mkdtempSync(join(tmpdir(), 'mcpspy-bench-'));

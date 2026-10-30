@@ -193,3 +193,17 @@ describe('Recorder validation', () => {
     store.close();
   });
 });
+
+describe('backfillTokens on old logs', () => {
+  it('estimates tool lists with per-tool detail, and costs nothing for unreadable replies', () => {
+    const store = new Store(':memory:');
+    const session = store.createSession({ name: 'x', transport: 'stdio', command: '[]', cwd: '/', pid: null, started_at: 1 });
+    const base = { session_id: session, ts: 1, size: 1, problem: null, latency_ms: null, issues: null, token_detail: null, tokens: null, request_id: null, direction: 'server' as const, kind: 'response' as const };
+    const list = store.insertMessage({ ...base, method: 'tools/list', rpc_id: '1', payload: '{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"a","inputSchema":{"type":"object"}}]}}' });
+    const broken = store.insertMessage({ ...base, method: 'tools/call', rpc_id: '2', payload: 'not json' });
+    expect(backfillTokens(store)).toBe(2);
+    expect(JSON.parse(store.getMessage(list)!.token_detail!)).toEqual([{ name: 'a', tokens: expect.any(Number) }]);
+    expect(store.getMessage(broken)).toMatchObject({ tokens: 0, token_detail: null });
+    store.close();
+  });
+});
