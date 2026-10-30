@@ -63,7 +63,7 @@ mcpspy wrap --dry-run    # shows what it would change, without changing it
 mcpspy unwrap            # puts the config back as it was
 ```
 
-It works on any JSON config that lists `mcpServers` or `servers`: pass the path for Cursor (`.cursor/mcp.json`), VS Code (`.vscode/mcp.json`), Claude Desktop (`claude_desktop_config.json`) or Windsurf. Use `--only <name>` to wrap one server. Use `--command <path>` when the agent can't find `mcpspy` on its PATH, which is common for desktop apps. The file is rewritten with its own indentation, so entries written on one line come back spread over several.
+It works on any JSON config that lists `mcpServers` or `servers`: pass the path for Cursor (`.cursor/mcp.json`), VS Code (`.vscode/mcp.json`), Claude Desktop (`claude_desktop_config.json`) or Windsurf. Use `--only <name>` to wrap one server. Use `--command <path>` when the agent can't find `mcpspy` on its PATH, which is common for desktop apps. The file is rewritten with its own indentation, so entries written on one line come back spread over several. It keeps its permissions, and a symlinked config (say, one kept in a dotfiles repo) stays a link, with the file it points to updated.
 
 <details>
 <summary>What <code>wrap</code> changes, if you'd rather edit by hand</summary>
