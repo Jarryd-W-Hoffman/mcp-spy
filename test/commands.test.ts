@@ -1005,6 +1005,28 @@ describe('mcpspy wrap and unwrap', () => {
     expect(unwrapped.stdout).toContain('Unwrapped 1 server in');
   });
 
+  it('warns when the policy sits where the servers it governs could write it', async () => {
+    const project = dir();
+    const path = join(project, 'mcp.json');
+    writeFileSync(path, '{"mcpServers":{"a":{"command":"node","args":["a.js"]}}}');
+    writeFileSync(join(project, 'policy.json'), '{"default": "allow"}');
+    const inside = await cli(['wrap', path, '--policy', join(project, 'policy.json'), '--dry-run']);
+    expect(inside.code).toBe(0);
+    expect(inside.stderr).toContain(`mcpspy: warning: the policy ${join(realpathSync(project), 'policy.json')} is inside the config's directory`);
+    const elsewhere = join(dir(), 'policy.json');
+    writeFileSync(elsewhere, '{"default": "allow"}');
+    expect((await cli(['wrap', path, '--policy', elsewhere, '--dry-run'])).stderr).not.toContain('warning');
+
+    const cwd = process.cwd();
+    process.chdir(project);
+    try {
+      const run = await cli(['run', '--db', tmpDb(), '--policy', 'policy.json', '--', process.execPath, echoServer], { stdin: '' });
+      expect(run.stderr).toContain("is inside the server's working directory. An agent that can write files there could change its own policy: make sure no tool");
+    } finally {
+      process.chdir(cwd);
+    }
+  });
+
   it('adds a checked policy, by absolute path', async () => {
     const path = config('{"mcpServers":{"a":{"command":"node","args":["a.js"]}}}');
     const folder = dir();
