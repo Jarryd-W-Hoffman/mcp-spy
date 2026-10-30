@@ -151,15 +151,15 @@ export class Interceptor {
   }
 }
 
-/** A refusal the agent can read: a failed tool result for tools/call, a JSON-RPC error otherwise. */
-function denial(message: Message, reason: string): object {
+/** A refusal the agent can read (used by the HTTP proxy too): a failed tool result for tools/call, a JSON-RPC error otherwise. */
+export function denial(message: { id?: unknown; method?: unknown }, reason: string): object {
   if (message.method === 'tools/call') {
     return { jsonrpc: '2.0', id: message.id, result: { content: [{ type: 'text', text: `Blocked by mcpspy policy: ${reason}` }], isError: true } };
   }
   return refusal(message.id, reason);
 }
 
-function refusal(id: unknown, reason: string): object {
+export function refusal(id: unknown, reason: string): object {
   return { jsonrpc: '2.0', id, error: { code: POLICY_ERROR, message: `Blocked by mcpspy policy: ${reason}` } };
 }
 

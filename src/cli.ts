@@ -38,7 +38,7 @@ const HELP = `mcpspy - see what your AI agent and its MCP servers say to each ot
 Usage:
   mcpspy run [--name <label>] [--policy <file>] [--mocks <file>] [--redact <regex>]... [--no-redact] [--db <path>] -- <command> [args...]
   mcpspy -- <command> [args...]            shorthand for run
-  mcpspy proxy <url> [--port <7800>] [--name <label>] [--mocks <file>] [-H 'Name: value']...
+  mcpspy proxy <url> [--port <7800>] [--name <label>] [--policy <file>] [--mocks <file>] [-H 'Name: value']...
                                            [--redact <regex>]... [--no-redact]
                                            proxy an MCP server over HTTP (Streamable HTTP or SSE)
   mcpspy tail [-f] [-n <count>] [--session <id>] [--json] [--db <path>]
@@ -184,6 +184,7 @@ async function proxyCommand(argv: string[]): Promise<void> {
       host: { type: 'string', default: '127.0.0.1' },
       name: { type: 'string' },
       mocks: { type: 'string' },
+      policy: { type: 'string' },
       header: { type: 'string', multiple: true, short: 'H' },
       db: { type: 'string' },
       ...REDACT_OPTIONS,
@@ -194,13 +195,15 @@ async function proxyCommand(argv: string[]): Promise<void> {
   if (!Number.isInteger(port) || port < 0 || port > 65535) fail('--port must be a port number');
   if (!isLoopbackHost(values.host)) fail('--host must be a loopback address; recorded traffic can contain secrets');
 
+  // Before listening: the agent must never reach the server without the policy it was given.
+  const policy = values.policy !== undefined ? loadPolicy(values.policy, values.name ?? null) : undefined;
   const mocks = values.mocks !== undefined ? loadMocks(values.mocks, values.name ?? null) : undefined;
   const headers = parseHeaders(values.header);
   const redactor = makeRedactor(values);
   const store = new Store(values.db);
   let proxy: HttpProxy;
   try {
-    proxy = await startHttpProxy({ upstream: positionals[0]!, store, name: values.name ?? null, host: values.host, port, mocks, headers, redactor });
+    proxy = await startHttpProxy({ upstream: positionals[0]!, store, name: values.name ?? null, host: values.host, port, mocks, policy, headers, redactor });
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
     fail(code === 'EADDRINUSE' ? `port ${port} is in use; pick another with --port` : (error as Error).message);

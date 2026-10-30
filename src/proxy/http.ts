@@ -3,11 +3,13 @@ import { request as httpsRequest } from 'node:https';
 import type { AddressInfo } from 'node:net';
 import { createBrotliDecompress, createGunzip, createInflate } from 'node:zlib';
 import type { MockEngine } from '../mocks.js';
+import type { PolicyEngine } from '../policy.js';
 import { Recorder } from '../recorder.js';
 import { Redactor } from '../redact.js';
 import { isLoopbackHost } from '../server.js';
 import { formatSseEvent, SseParser, type SseEvent } from '../sse.js';
 import type { Store } from '../store.js';
+import { denial, refusal } from './interceptor.js';
 
 export interface HttpProxyOptions {
   /** The real server's MCP endpoint, e.g. https://mcp.example.com/mcp. */
@@ -19,6 +21,8 @@ export interface HttpProxyOptions {
   /** 0 picks a free port. */
   port?: number;
   mocks?: MockEngine;
+  /** A policy the agent's requests must pass before they're forwarded (see src/policy.ts). */
+  policy?: PolicyEngine;
   /**
    * Headers to send upstream with every request, replacing the agent's (e.g. an
    * Authorization token, so the agent needn't log in). Never recorded.
@@ -59,7 +63,7 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
   const upstream = new URL(options.upstream);
   const redactor = options.redactor ?? new Redactor();
   if (upstream.protocol !== 'http:' && upstream.protocol !== 'https:') throw new Error(`${options.upstream} is not an http(s) URL`);
-  const { store, mocks = null } = options;
+  const { store, mocks = null, policy = null } = options;
   const warn = options.warn ?? ((message: string) => process.stderr.write(`[mcpspy] ${message}\n`));
   const send = upstream.protocol === 'https:' ? httpsRequest : httpRequest;
 
@@ -68,8 +72,8 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
   const all: Tracked[] = [];
   /** Where traffic from servers that never assign a session id goes: the latest initialize. */
   let fallback: Tracked | null = null;
-  /** tools/list request ids (per session) whose responses get the mock tools added. */
-  const toolLists = new WeakMap<Tracked, Set<string>>();
+  /** Ids (per session) of tools/list and tools/call requests whose replies mocks or the policy may change. */
+  const awaiting = new WeakMap<Tracked, Map<string, 'list' | 'call'>>();
 
   let recordingBroken = false;
   const record = (fn: () => void): void => {
@@ -140,10 +144,29 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
     }
     // A GET without a session is the legacy transport's event stream (or not MCP at all); tracked once we see SSE.
 
+    let forwarded = body;
     if (tracked && method === 'POST' && text.trim() !== '') {
       const session = tracked;
       record(() => session.recorder.frame('client', text));
-      if (mocks && isToolList(parsed)) toolListsOf(session).add(JSON.stringify((parsed as { id: unknown }).id));
+      if (policy) {
+        const reply = checkPolicy(parsed);
+        if (reply) {
+          const headers: Record<string, string> = { 'content-type': 'application/json' };
+          if (sessionHeader !== null) headers['mcp-session-id'] = sessionHeader;
+          if (reply.text === null) res.writeHead(202, headers).end();
+          else {
+            const replyText = reply.text;
+            res.writeHead(200, headers).end(replyText);
+            record(() => session.recorder.frame('server', replyText, reply.rule));
+          }
+          return;
+        }
+        // What's forwarded is the message as checked, so the server can't read anything the policy didn't.
+        forwarded = Buffer.from(JSON.stringify(parsed));
+      }
+      if (isRequest(parsed) && (parsed.method === 'tools/list' || parsed.method === 'tools/call')) {
+        awaitingOf(session).set(JSON.stringify(parsed.id), parsed.method === 'tools/list' ? 'list' : 'call');
+      }
     }
 
     // Mock rules apply to single requests; batches and replies always go through.
@@ -153,7 +176,7 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
       if (decision?.action === 'drop') return; // never answer; the client times out
       if (decision?.action === 'respond') {
         const session = tracked;
-        toolListsOf(session).delete(JSON.stringify(parsed.id));
+        awaitingOf(session).delete(JSON.stringify(parsed.id));
         await delay(decision.delayMs);
         const reply = JSON.stringify({ jsonrpc: '2.0', id: parsed.id, ...decision.reply });
         const headers: Record<string, string> = { 'content-type': 'application/json' };
@@ -174,7 +197,7 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
     }
     for (const [name, value] of Object.entries(options.headers ?? {})) headers[name.toLowerCase()] = value;
     headers['accept-encoding'] = 'identity'; // so bodies can be read on the way through
-    if (body.length > 0) headers['content-length'] = String(body.length);
+    if (forwarded.length > 0) headers['content-length'] = String(forwarded.length);
 
     const upstreamReq = send(target, { method, headers });
     res.on('close', () => {
@@ -246,13 +269,12 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
         const reply = decoded !== null && type.includes('json') ? parseJson(decoded) : undefined;
 
         if (session && decoded !== null && reply !== undefined && isJsonRpc(reply)) {
-          const patched = patchToolList(session, reply);
-          if (patched !== null) {
-            raw = Buffer.from(patched);
+          const shaped = shapeReply(session, reply);
+          if (shaped !== null) {
+            raw = Buffer.from(shaped.text);
             responseHeaders['content-length'] = String(raw.length);
           }
-          const recorded = patched ?? decoded;
-          record(() => session.recorder.frame('server', recorded, patched !== null ? 'mock tools' : mockedBy));
+          record(() => session.recorder.frame('server', shaped?.text ?? decoded, shaped?.rule ?? mockedBy));
         } else if (session && status >= 400) {
           const detail = decoded !== null ? decoded.trim().slice(0, 500) : `${raw.length} bytes, ${encoding}`;
           record(() => session.recorder.stderr(`[http] ${status} ${up.statusMessage} for ${method} ${local}${detail ? `: ${detail}` : ''}`));
@@ -266,7 +288,28 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
         }
       });
     });
-    upstreamReq.end(body);
+    upstreamReq.end(forwarded);
+  }
+
+  /**
+   * The reply to give instead of forwarding, when the policy refuses a body:
+   * refused requests get a refusal, refused notifications nothing (text null).
+   * Batches and bodies that aren't JSON are refused whole.
+   */
+  function checkPolicy(parsed: unknown): { text: string | null; rule: string } | null {
+    if (parsed === undefined || Array.isArray(parsed)) {
+      warn(parsed === undefined ? 'policy: refused a request body that is not JSON' : 'policy: refused a batch of messages');
+      const requests = Array.isArray(parsed) ? parsed.filter(isRequest) : [];
+      const why = parsed === undefined ? 'the request body is not JSON' : 'batched requests are not allowed by the policy';
+      return { text: requests.length > 0 ? JSON.stringify(requests.map((request) => refusal(request.id, why))) : null, rule: 'policy' };
+    }
+    const message = parsed as { id?: unknown; method?: unknown; params?: unknown };
+    if (typeof message !== 'object' || message === null || typeof message.method !== 'string') return null;
+    const verdict = policy!.check(message.method, message.params);
+    if (verdict.allow) return null;
+    const what = message.method === 'tools/call' ? `tools/call ${(message.params as { name: string }).name}` : message.method;
+    warn(`policy denied ${what} (${verdict.rule}): ${verdict.reason}`);
+    return { text: message.id !== undefined ? JSON.stringify(denial(message, verdict.reason)) : null, rule: `policy: ${verdict.rule}` };
   }
 
   /** Records an event from the server and returns replacement text, if it had to change. */
@@ -283,24 +326,46 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
     }
     if (event.event !== 'message' || event.data === null || event.data.trim() === '') return null;
     const data = event.data;
-    const patched = patchToolList(session, parseJson(data));
-    record(() => session.recorder.frame('server', patched ?? data, patched !== null ? 'mock tools' : null));
-    return patched !== null ? formatSseEvent({ event: event.event, id: event.id, data: patched }) : null;
+    const shaped = shapeReply(session, parseJson(data));
+    record(() => session.recorder.frame('server', shaped?.text ?? data, shaped?.rule ?? null));
+    return shaped !== null ? formatSseEvent({ event: event.event, id: event.id, data: shaped.text }) : null;
   }
 
-  function toolListsOf(session: Tracked): Set<string> {
-    let ids = toolLists.get(session);
-    if (!ids) toolLists.set(session, (ids = new Set()));
+  function awaitingOf(session: Tracked): Map<string, 'list' | 'call'> {
+    let ids = awaiting.get(session);
+    if (!ids) awaiting.set(session, (ids = new Map()));
     return ids;
   }
 
-  /** A tools/list response with the mock tools added, or null when nothing changes. */
-  function patchToolList(session: Tracked, message: unknown): string | null {
-    if (!mocks || typeof message !== 'object' || message === null || Array.isArray(message)) return null;
+  /**
+   * A reply as the agent should get it: tool lists with mock tools added and
+   * forbidden ones removed, tool results held to the policy's limits. Null
+   * when nothing changes.
+   */
+  function shapeReply(session: Tracked, message: unknown): { text: string; rule: string } | null {
+    if (typeof message !== 'object' || message === null || Array.isArray(message)) return null;
     const { id, result } = message as { id?: unknown; result?: unknown };
-    if (id === undefined || result === undefined || !toolListsOf(session).delete(JSON.stringify(id))) return null;
-    if (mocks.tools.length === 0) return null;
-    return JSON.stringify({ ...message, result: mocks.patchToolList(result) });
+    const key = JSON.stringify(id);
+    const kind = id === undefined ? undefined : awaitingOf(session).get(key);
+    if (kind === undefined) return null;
+    awaitingOf(session).delete(key);
+    if (result === undefined) return null;
+
+    let shaped: unknown = result;
+    let rule: string | null = null;
+    if (kind === 'list' && mocks && mocks.tools.length > 0) {
+      shaped = mocks.patchToolList(shaped);
+      rule = 'mock tools';
+    }
+    if (kind === 'list' && policy) {
+      const filtered = policy.filterToolList(shaped);
+      if (filtered.hidden.length > 0) [shaped, rule] = [filtered.result, `policy: hid ${filtered.hidden.join(', ')}`];
+    }
+    if (kind === 'call' && policy) {
+      const limited = policy.limitResult(shaped);
+      if (limited.change) [shaped, rule] = [limited.result, `policy: ${limited.change}`];
+    }
+    return rule === null ? null : { text: JSON.stringify({ ...message, result: shaped }), rule };
   }
 
   await new Promise<void>((resolve, reject) => {
@@ -380,10 +445,6 @@ function isRequest(value: unknown): value is { id: string | number; method: stri
 function isInitialize(value: unknown): boolean {
   const items = Array.isArray(value) ? value : [value];
   return items.some((item) => isRequest(item) && item.method === 'initialize');
-}
-
-function isToolList(value: unknown): boolean {
-  return isRequest(value) && value.method === 'tools/list';
 }
 
 function delay(ms: number): Promise<void> {
