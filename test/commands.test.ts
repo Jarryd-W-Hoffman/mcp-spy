@@ -1113,29 +1113,28 @@ describe('less common paths', () => {
   });
 
   it('prunes by MCPSPY_RETENTION daily', async () => {
-    vi.useFakeTimers({ toFake: ['setInterval'] });
+    // Runs the daily callback directly: advancing fake timers by a day would also run the UI's 250 ms poll ~350,000 times.
+    const setInterval = vi.spyOn(globalThis, 'setInterval');
+    const db = tmpDb();
+    vi.stubEnv('MCPSPY_RETENTION', '30d');
+    const result = await cli(['ui', '--port', '0', '--db', db]);
+    const daily = setInterval.mock.calls.find(([, ms]) => ms === 24 * 60 * 60 * 1000)![0] as () => void;
+    setInterval.mockRestore();
+    withStore(db, (store) => {
+      const started = Date.now() - 90 * 24 * 60 * 60 * 1000;
+      const id = store.createSession({ name: null, transport: 'stdio', command: '[]', cwd: '/', pid: null, started_at: started });
+      store.endSession(id, { ended_at: started, exit_code: 0, exit_signal: null });
+    });
+    const captured = capture();
     try {
-      const db = tmpDb();
-      vi.stubEnv('MCPSPY_RETENTION', '30d');
-      const result = await cli(['ui', '--port', '0', '--db', db]);
-      withStore(db, (store) => {
-        const started = Date.now() - 90 * 24 * 60 * 60 * 1000;
-        const id = store.createSession({ name: null, transport: 'stdio', command: '[]', cwd: '/', pid: null, started_at: started });
-        store.endSession(id, { ended_at: started, exit_code: 0, exit_signal: null });
-      });
-      const captured = capture();
-      try {
-        vi.advanceTimersByTime(24 * 60 * 60 * 1000);
-        await vi.waitFor(() => expect(captured.stdout).toContain('Pruned 1 old session'));
-      } finally {
-        captured.restore();
-      }
-      const exited = new Promise<number>((resolve) => vi.spyOn(process, 'exit').mockImplementation(((code: number) => resolve(code)) as never));
-      result.signals.get('SIGINT')!();
-      await exited;
+      daily();
+      await vi.waitFor(() => expect(captured.stdout).toContain('Pruned 1 old session'));
     } finally {
-      vi.useRealTimers();
+      captured.restore();
     }
+    const exited = new Promise<number>((resolve) => vi.spyOn(process, 'exit').mockImplementation(((code: number) => resolve(code)) as never));
+    result.signals.get('SIGINT')!();
+    await exited;
   });
 
   it('wraps in a dry run, keeps a final newline and rejects JSON with comments', async () => {

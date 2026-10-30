@@ -235,7 +235,8 @@ describe('UI server edge cases', () => {
   const raw = (method: string, path: string, headers: Record<string, string> = {}, body?: string) =>
     new Promise<{ status: number; body: string }>((resolve, reject) => {
       const port = Number(new URL(ui.url).port);
-      const req = request({ host: '127.0.0.1', port, method, path, headers: { host: `localhost:${port}`, ...headers } }, (res) => {
+      // The server listens on localhost, which may be ::1 rather than 127.0.0.1 (it is on GitHub's runners).
+      const req = request({ host: 'localhost', port, method, path, headers: { host: `localhost:${port}`, ...headers } }, (res) => {
         let text = '';
         res.on('data', (chunk) => (text += chunk));
         res.on('end', () => resolve({ status: res.statusCode!, body: text }));
