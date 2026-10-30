@@ -148,8 +148,15 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
       return;
     }
 
-    // Node sets url and method on every request a server receives.
+    // Node sets url and method on every request a server receives. Only paths on the
+    // upstream are proxied: an absolute-form target (`GET http://elsewhere/`), or a path
+    // like //elsewhere or /\\elsewhere, would otherwise send the request, with any -H
+    // token, to another server.
     const target = new URL(req.url!, upstream);
+    if (!req.url!.startsWith('/') || target.origin !== upstream.origin) {
+      res.writeHead(400, { 'content-type': 'text/plain' }).end(`mcpspy only proxies paths on ${upstream.origin}`);
+      return;
+    }
     const local = `${target.pathname}${target.search}`;
     const method = req.method!;
     const body = method === 'GET' || method === 'HEAD' || method === 'DELETE' ? Buffer.alloc(0) : await readAll(req);

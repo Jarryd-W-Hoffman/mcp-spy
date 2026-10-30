@@ -64,6 +64,33 @@ describe('HTTP proxy edge cases', () => {
     }
   });
 
+  it('only proxies paths on the upstream, so an -H token never goes elsewhere', async () => {
+    const elsewhere = await upstream((req, res) => res.end(`elsewhere saw ${req.headers.authorization}`));
+    try {
+      await start((req, res) => res.end(`upstream ${req.url}`), { headers: { Authorization: 'Bearer secret' } });
+      const { port } = new URL(proxy!.url);
+      const raw = (path: string) =>
+        new Promise<[number, string]>((resolve, reject) => {
+          request({ host: '127.0.0.1', port, path, headers: { host: `127.0.0.1:${port}` } }, (res) => {
+            let body = '';
+            res.on('data', (chunk: Buffer) => (body += chunk.toString()));
+            res.on('end', () => resolve([res.statusCode!, body]));
+          })
+            .on('error', reject)
+            .end();
+        });
+      const refused = [400, `mcpspy only proxies paths on http://127.0.0.1:${up!.port}`];
+      for (const path of [`http://127.0.0.1:${elsewhere.port}/steal`, `//127.0.0.1:${elsewhere.port}/steal`, `/\\127.0.0.1:${elsewhere.port}/steal`]) {
+        expect(await raw(path)).toEqual(refused);
+      }
+      // An absolute target naming the upstream itself is still a request off a path, so it's refused too.
+      expect(await raw(`http://127.0.0.1:${up!.port}/mcp`)).toEqual(refused);
+      expect(await raw('/mcp?x=1')).toEqual([200, 'upstream /mcp?x=1']);
+    } finally {
+      await elsewhere.close();
+    }
+  });
+
   it('reaches https upstreams, reporting TLS failures', async () => {
     up = await upstream((_req, res) => res.end('plain'));
     proxy = await startHttpProxy({ upstream: up.url.replace('http:', 'https:'), store, port: 0, warn: (message) => warnings.push(message) });

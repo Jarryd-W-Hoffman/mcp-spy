@@ -146,7 +146,7 @@ Headers such as `Authorization` are forwarded but never recorded. Replays and su
 mcpspy proxy https://api.githubcopilot.com/mcp/ --name github -H "Authorization: Bearer $GITHUB_TOKEN"
 ```
 
-The startup message names the headers the proxy adds, but never their values, and they're never recorded.
+The startup message names the headers the proxy adds, but never their values. They're never recorded, and only ever sent to that server: a request aimed anywhere else (`GET http://elsewhere/`, or a path like `//elsewhere`) is refused.
 
 ### 🪙 Context cost
 
