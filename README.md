@@ -343,6 +343,23 @@ mcpspy run --name files --policy policy.json -- npx -y @modelcontextprotocol/ser
 mcpspy wrap --policy policy.json      # every wrapped server gets it
 ```
 
+Every request from the agent passes the policy before mock rules or the server see it, and replies are checked on the way back:
+
+```mermaid
+flowchart LR
+    A["Agent"] --> J{"Valid JSON,<br/>not a batch?"}
+    J -->|no| X["Refused"]
+    J -->|yes| R{"First rule that matches<br/>tool · method · server · where"}
+    R -->|"deny, a failed test,<br/>or rate limit reached"| D["Refusal with the reason,<br/>recorded as [policy: rule]"]
+    R -->|"none, and default deny"| D
+    R -->|allow| F["The message as checked<br/>(re-serialised)"] --> M["Mock rules"] --> S["Server"]
+    S --> L{"Reply"}
+    L -->|tools/list| H["Hide tools no call<br/>could use"] --> A
+    L -->|tool result| C["Redact matches,<br/>cap the size"] --> A
+    L -->|other| A
+    D --> A
+```
+
 - **Rules** are checked in order, and the first one that matches decides. A rule matches on `tool` (with `*` wildcards), or `method` for anything other than `tools/call`, and on `server` (the `--name`, with wildcards). It may also have a `where` of tests on the arguments (or a request's params), keyed by dot path. It then either `allow`s (`true`) or `deny`s, giving a reason the agent sees. When an allow rule's tests fail, the refusal names the argument (`"path" is not allowed for read_file`).
 - **Tests**:
   - `under` (directories, relative to the policy file): the path must be inside one of them once symlinks are followed, so `src/../../etc` and a link out of `src/` both fail. A relative path in the arguments is resolved against the server's working directory.
@@ -357,13 +374,23 @@ mcpspy wrap --policy policy.json      # every wrapped server gets it
 - **Tool lists** lose the tools no call could be allowed to use, so the agent doesn't plan around them. A tool that some arguments could unlock stays listed.
 - **Results**: `maxBytes` replaces an oversized tool result with an error, and `redact` replaces matches in what the agent receives. This is unlike [Secrets](#-secrets), which only changes the record.
 
-A refused tool call gets a tool result with `isError: true` and the reason, so the agent can adjust. Other refused requests get a JSON-RPC error (code `-32001`). Each decision goes to stderr (`[mcpspy] policy denied tools/call write_file (no writes): writes need a human`), and its reply is recorded with the rule that decided it. In the UI, those rows carry a **policy** badge.
+A refused tool call gets a tool result with `isError: true` and the reason, so the agent can adjust. Other refused requests get a JSON-RPC error (code `-32001`). Each decision goes to stderr (`[mcpspy] policy denied tools/call write_file (no writes): writes need a human`), and its reply is recorded with the rule that decided it, or `default deny` when no rule matched. In the UI, those rows carry a **policy** badge.
 
 **It fails closed:**
 - **Broken policy:** mcpspy refuses to start the server, and `wrap` refuses to write the config.
 - **Broken edit:** while running, the policy reloads when you save it. A broken edit keeps the old rules in force.
 - **What the server sees:** the request exactly as it was checked, re-serialised. JSON with duplicate keys therefore can't show the policy one tool name and the server another.
 - **Batches and invalid lines:** batched requests, and lines from the agent that aren't JSON, are refused.
+
+<p align="center">
+    <img src="docs/policy.png" alt="A read_file call for project/../.ssh/id_ed25519 refused by the default deny rule: the detail pane gives the reason the agent saw, and policy badges mark every call the policy answered or changed." width="900">
+</p>
+
+The tools/list reply above lost `write_file` and `delete_branch`, which no rule allows:
+
+<p align="center">
+    <img src="docs/policy-tools.png" alt="A tools/list response with write_file and delete_branch hidden by the policy." width="900">
+</p>
 
 Policies apply to `mcpspy run` (stdio servers) for now. `mcpspy proxy` doesn't take `--policy` yet.
 
@@ -466,7 +493,24 @@ sequenceDiagram
 
 Recording is wrapped so it can never take the session down: if the database fails, the proxy warns once on stderr and keeps forwarding. Signals are passed on to the server, and the proxy exits with the server's exit code, so the agent sees exactly what it would without mcpspy.
 
-With `--mocks`, the proxy has to read a request before deciding whether the server sees it at all, so it forwards whole lines instead of raw chunks. Mock rules are the only reason it ever does.
+With `--policy` or `--mocks`, the proxy has to read a request before deciding whether the server sees it at all, so it handles whole lines instead of raw chunks (`src/proxy/interceptor.ts`). Those two options are the only reason it ever does. With a policy, what reaches the server is the message the policy checked, re-serialised, rather than the agent's bytes:
+
+```mermaid
+sequenceDiagram
+    participant Agent
+    participant Proxy as mcpspy run --policy
+    participant Server
+    Agent->>Proxy: tools/call read_file {"path":"project/src/app.ts"}
+    Note over Proxy: rule "project files": path is under ./project
+    Proxy->>Server: the checked message, re-serialised
+    Server->>Proxy: result
+    Note over Proxy: redact, cap the size
+    Proxy->>Agent: result
+    Agent->>Proxy: tools/call read_file {"path":"../.ssh/id_ed25519"}
+    Note over Proxy: no rule allows it
+    Proxy->>Agent: isError result: "path" is not allowed for read_file
+    Note over Server: never sees the call
+```
 
 ### From bytes to a recorded message
 

@@ -107,7 +107,7 @@ describe('stdio proxy with a policy', () => {
     expect(replyRules()).toEqual([
       ['1', 'policy: hid slow, time, env'],
       ['2', 'policy: no writes'],
-      ['4', 'policy: default'],
+      ['4', 'policy: default deny'],
       ['5', 'policy: rules[3]'],
     ]);
     expect(proxy.warnings()).toContain('[mcpspy] policy denied tools/call write_file (no writes): writes need review\n');

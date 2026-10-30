@@ -130,7 +130,7 @@ export function DetailPane({ exchange, sessionName, compareBase, onCompareBase, 
             {error && <p className="detail-error">Couldn't load message: {error}</p>}
             {failure && <p className="detail-failure mono">{failure}</p>}
             {exchange.response?.mock && (
-              <p className="detail-mock">
+              <p className={isPolicy(exchange.response.mock) ? 'detail-mock detail-policy' : 'detail-mock'}>
                 {isPolicy(exchange.response.mock) ? (
                   <>
                     Answered or changed by the policy: <strong>{exchange.response.mock.slice('policy: '.length)}</strong>

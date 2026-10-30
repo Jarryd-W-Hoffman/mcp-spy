@@ -242,7 +242,7 @@ export class PolicyEngine {
       return { allow: true, rule: rule.name };
     }
     if (method !== 'tools/call' || this.policy.defaultAllow) return { allow: true, rule: null };
-    return { allow: false, rule: 'default', reason: blocked !== null ? `"${blocked}" is not allowed for ${tool}` : `no rule allows ${tool}` };
+    return { allow: false, rule: 'default deny', reason: blocked !== null ? `"${blocked}" is not allowed for ${tool}` : `no rule allows ${tool}` };
   }
 
   /**

@@ -65,7 +65,7 @@ describe('PolicyEngine.check', () => {
     });
     expect(policy.check('tools/call', call('write_file'))).toEqual({ allow: false, rule: 'no writes', reason: 'writes need review' });
     expect(policy.check('tools/call', call('read_file'))).toEqual({ allow: true, rule: 'rules[1]' });
-    expect(policy.check('tools/call', call('search'))).toEqual({ allow: false, rule: 'default', reason: 'no rule allows search' });
+    expect(policy.check('tools/call', call('search'))).toEqual({ allow: false, rule: 'default deny', reason: 'no rule allows search' });
     expect(policy.check('tools/list', {})).toEqual({ allow: true, rule: null });
     expect(policy.check('tools/call', {})).toEqual({ allow: false, rule: 'policy', reason: 'a tool call needs a tool name' });
     expect(policy.check('tools/call', null)).toMatchObject({ allow: false, rule: 'policy' });
@@ -131,7 +131,7 @@ describe('PolicyEngine.check', () => {
     });
     expect(policy.check('tools/call', call('read', { path: '/etc/passwd', opts: { mode: 'w' } }))).toEqual({
       allow: false,
-      rule: 'default',
+      rule: 'default deny',
       reason: '"path" is not allowed for read',
     });
     expect(policy.check('tools/call', call('read', { path: '/srv/a', opts: { mode: 'r' } })).allow).toBe(false);

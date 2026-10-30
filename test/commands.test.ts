@@ -190,7 +190,7 @@ describe('mcpspy run', () => {
     expect(result.code).toBe(0);
     expect(result.stdout).toContain('"text":"hi"');
     expect(result.stdout).toContain('Blocked by mcpspy policy: no rule allows env');
-    expect(result.stderr).toContain('[mcpspy] policy denied tools/call env (default): no rule allows env');
+    expect(result.stderr).toContain('[mcpspy] policy denied tools/call env (default deny): no rule allows env');
 
     writeFileSync(policy, '{"rules": [{"tool": "echo"}]}');
     const marker = join(folder, 'started');
