@@ -56,6 +56,33 @@ interface ToolSchemas {
 
 const TOOL_NAME = /^[A-Za-z0-9_.-]{1,128}$/;
 
+/** The server capability each client request needs (by method, or by prefix). */
+const SERVER_CAPABILITY: [prefix: string, capability: string][] = [
+  ['tools/', 'tools'],
+  ['resources/', 'resources'],
+  ['prompts/', 'prompts'],
+  ['logging/setLevel', 'logging'],
+  ['completion/complete', 'completions'],
+];
+
+/** The client capability each server request needs. */
+const CLIENT_CAPABILITY: Record<string, string> = {
+  'sampling/createMessage': 'sampling',
+  'roots/list': 'roots',
+  'elicitation/create': 'elicitation',
+};
+
+/** Notifications a side may only send if it declared the capability and flag. */
+const NOTIFICATION_FLAG: Record<string, [capability: string, flag: string]> = {
+  'notifications/tools/list_changed': ['tools', 'listChanged'],
+  'notifications/prompts/list_changed': ['prompts', 'listChanged'],
+  'notifications/resources/list_changed': ['resources', 'listChanged'],
+  'notifications/resources/updated': ['resources', 'subscribe'],
+  'notifications/roots/list_changed': ['roots', 'listChanged'],
+};
+
+type Side = 'client' | 'server';
+
 /**
  * Checks one session's traffic against what its server declared: tool
  * arguments against inputSchema, results against outputSchema and the MCP
@@ -63,6 +90,99 @@ const TOOL_NAME = /^[A-Za-z0-9_.-]{1,128}$/;
  */
 export class SessionValidator {
   private tools = new Map<string, ToolSchemas>();
+  /** Capabilities each side declared in initialize; null until seen, so sessions joined midway aren't judged. */
+  private readonly capabilities: Record<Side, Record<string, unknown> | null> = { client: null, server: null };
+
+  /**
+   * The lifecycle and capability rules: what initialize must return, what
+   * each side may send given what the other declared, and requests sent
+   * before initialize was answered.
+   */
+  protocol(from: Side, kind: string, method: string, message: Record<string, unknown>): Issue[] {
+    const params = isObject(message.params) ? message.params : {};
+    if (kind === 'request' && from === 'client' && method === 'initialize') {
+      this.capabilities.client = isObject(params.capabilities) ? params.capabilities : {};
+      this.capabilities.server = null;
+      return [];
+    }
+    if (kind === 'response' && method === 'initialize') return this.initializeResult(message.result);
+
+    const other: Side = from === 'client' ? 'server' : 'client';
+    const declared = this.capabilities[other];
+    if (kind === 'request' && from === 'client' && method !== 'ping' && this.capabilities.client !== null && declared === null) {
+      return [warning('method', `${method} was sent before the server answered initialize`)];
+    }
+    if (declared === null) return [];
+    if (kind === 'request') {
+      const needed = from === 'client' ? SERVER_CAPABILITY.find(([prefix]) => method.startsWith(prefix))?.[1] : CLIENT_CAPABILITY[method];
+      if (needed !== undefined && !isObject(declared[needed])) {
+        // A client asking is harmless (the server says no); a server asking breaks the client's trust in capabilities.
+        const issue = from === 'client' ? warning : error;
+        return [issue('method', `${method} needs the "${needed}" capability, which the ${other} didn't declare in initialize`)];
+      }
+    }
+    // Notifications are about the sender's own capabilities.
+    const flag = kind === 'notification' ? NOTIFICATION_FLAG[method] : undefined;
+    const own = this.capabilities[from];
+    if (flag && own !== null) {
+      const [capability, name] = flag;
+      const section = own[capability];
+      if (!isObject(section) || section[name] !== true) {
+        return [warning('method', `${method} needs "${capability}": { "${name}": true } in the ${from}'s capabilities, which it didn't declare`)];
+      }
+    }
+    return [];
+  }
+
+  private initializeResult(result: unknown): Issue[] {
+    if (!isObject(result)) return [error('result', 'initialize result must be an object')];
+    const issues: Issue[] = [];
+    if (typeof result.protocolVersion !== 'string') issues.push(error('result.protocolVersion', 'initialize result needs a protocolVersion string'));
+    if (!isObject(result.capabilities)) issues.push(error('result.capabilities', 'initialize result needs a capabilities object'));
+    const info = result.serverInfo;
+    if (!isObject(info)) issues.push(error('result.serverInfo', 'initialize result needs serverInfo with a name and version'));
+    else {
+      for (const field of ['name', 'version']) {
+        if (typeof info[field] !== 'string') issues.push(error(`result.serverInfo.${field}`, `serverInfo needs a string ${field}`));
+      }
+    }
+    this.capabilities.server = isObject(result.capabilities) ? result.capabilities : {};
+    return issues;
+  }
+
+  /** Checks the results of the resource and prompt methods against the MCP shapes. */
+  result(method: string, result: unknown): Issue[] {
+    const list = (field: string, check: (item: Record<string, unknown>, at: string) => Issue[]): Issue[] => {
+      if (!isObject(result) || !Array.isArray(result[field])) return [error(`result.${field}`, `${method} result must have a ${field} array`)];
+      return result[field].flatMap((item: unknown, index: number) => {
+        const at = `result.${field}[${index}]`;
+        return isObject(item) ? check(item, at) : [error(at, `${field} entries must be objects`)];
+      });
+    };
+    const strings = (item: Record<string, unknown>, at: string, ...fields: string[]) =>
+      fields.filter((field) => typeof item[field] !== 'string').map((field) => error(`${at}.${field}`, `needs a string "${field}"`));
+
+    switch (method) {
+      case 'resources/list':
+        return list('resources', (item, at) => strings(item, at, 'uri', 'name'));
+      case 'resources/templates/list':
+        return list('resourceTemplates', (item, at) => strings(item, at, 'uriTemplate', 'name'));
+      case 'resources/read':
+        return list('contents', (item, at) => [
+          ...strings(item, at, 'uri'),
+          ...(typeof item.text === 'string' || typeof item.blob === 'string' ? [] : [error(at, 'resource contents need text or blob')]),
+        ]);
+      case 'prompts/list':
+        return list('prompts', (item, at) => strings(item, at, 'name'));
+      case 'prompts/get':
+        return list('messages', (item, at) => [
+          ...(item.role === 'user' || item.role === 'assistant' ? [] : [error(`${at}.role`, 'role must be "user" or "assistant"')]),
+          ...contentBlockIssues(item.content, `${at}.content`),
+        ]);
+      default:
+        return [];
+    }
+  }
 
   /**
    * Validates a tools/list result and remembers its schemas. A later page (the
@@ -216,22 +336,23 @@ export function checkMessage(
   toolName: string | null,
   laterPage = false,
 ): Issue[] {
-  if (message.method === null) return [];
-  const isRequest = message.direction === 'client' && message.kind === 'request';
-  const isReply = message.direction === 'server' && message.kind === 'response';
-  if (!isRequest && !isReply) return [];
-  if (isRequest && message.method !== 'tools/call') return [];
-  if (isReply && message.method !== 'tools/call' && message.method !== 'tools/list') return [];
-
-  let parsed: Record<string, unknown>;
+  if (message.method === null || (message.direction !== 'client' && message.direction !== 'server')) return [];
+  let parsed: unknown;
   try {
-    parsed = JSON.parse(message.payload) as Record<string, unknown>;
+    parsed = JSON.parse(message.payload);
   } catch {
     return [];
   }
-  if (isRequest) return validator.toolCall(parsed.params);
-  if (message.method === 'tools/list') return validator.toolList(parsed.result, laterPage);
-  return validator.toolResult(toolName, parsed.result);
+  if (!isObject(parsed)) return [];
+  const issues = validator.protocol(message.direction, message.kind, message.method, parsed);
+
+  const isRequest = message.direction === 'client' && message.kind === 'request';
+  const isReply = message.direction === 'server' && message.kind === 'response';
+  if (isRequest && message.method === 'tools/call') issues.push(...validator.toolCall(parsed.params));
+  if (isReply && message.method === 'tools/list') issues.push(...validator.toolList(parsed.result, laterPage));
+  if (isReply && message.method === 'tools/call') issues.push(...validator.toolResult(toolName, parsed.result));
+  if (isReply) issues.push(...validator.result(message.method, parsed.result));
+  return issues;
 }
 
 /** The tool name a tools/call request payload names, if any. */

@@ -268,6 +268,9 @@ Every message is checked as it is recorded, against what the server itself decla
 - **Calls:** `tools/call` arguments against the tool's `inputSchema` (JSON Schema draft-07 or 2020-12, with formats such as `uri` and `date-time`), and calls to tools the server never listed.
 - **Results:** content blocks against the MCP rules (block types and their required fields, `isError`) and, when the tool has an `outputSchema`, `structuredContent` against it.
 - **Tool lists:** duplicate names, names outside `A–Z a–z 0–9 _ - .`, and missing or invalid schemas.
+- **The handshake:** an `initialize` result without a `protocolVersion`, `capabilities`, or `serverInfo` name and version, and requests other than `ping` sent before it arrived (warnings).
+- **Capabilities:** each side may only use what the other declared in `initialize`. A server asking for `sampling`, `roots` or `elicitation` the client didn't declare is an error. A client calling `resources/*`, `prompts/*`, `tools/*`, `logging/setLevel` or `completion/complete` without the server's capability is a warning, since the server will just refuse. So are `list_changed` and `resources/updated` notifications the sender didn't declare. Sessions mcpspy joined after `initialize`, such as an HTTP session that started before the proxy, skip these checks.
+- **Resources and prompts:** results of `resources/list`, `resources/templates/list`, `resources/read`, `prompts/list` and `prompts/get` against the MCP shapes.
 
 Issues show up as `⚠ 2 issues` in `tail`, as a badge and a list in the UI (with a *Schema issues* filter), and in `mcpspy validate`, which exits 1 on errors:
 

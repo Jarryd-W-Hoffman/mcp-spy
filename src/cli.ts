@@ -1158,7 +1158,7 @@ function validate(argv: string[]): void {
     // Foreign keys keep a response's request.
     const request = message.request_id !== null ? requests.get(message.request_id)! : message;
     const subject = requestSubject(request.method, request.payload);
-    const what = message.direction === 'client' ? 'request' : 'response';
+    const what = message.kind;
 
     out(
       `${style.cyan(`${session?.name ?? 'session'} #${message.session_id}`)}  ${[message.method, subject].filter(Boolean).join(' ')} ${what} ${style.dim(`#${message.id}`)}`,

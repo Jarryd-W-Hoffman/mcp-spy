@@ -159,3 +159,157 @@ describe('more validation', () => {
     expect(calledTool('{')).toBeNull();
   });
 });
+
+describe('protocol checks', () => {
+  type Sent = { from: 'client' | 'server'; kind: string; method: string; body?: object };
+  /** Runs messages through checkMessage, returning each one's issues as "path: message". */
+  const run = async (messages: Sent[]) => {
+    const { checkMessage } = await import('../src/validate.js');
+    const validator = new SessionValidator();
+    return messages.map(({ from, kind, method, body = {} }) =>
+      checkMessage(validator, { direction: from, kind, method, payload: JSON.stringify({ jsonrpc: '2.0', ...body }) }, null).map(
+        (issue) => `${issue.severity} ${issue.path}: ${issue.message}`,
+      ),
+    );
+  };
+  const initialize = (capabilities?: object): Sent => ({ from: 'client', kind: 'request', method: 'initialize', body: { params: capabilities ? { capabilities } : {} } });
+  const initialized = (capabilities: object = {}): Sent => ({
+    from: 'server',
+    kind: 'response',
+    method: 'initialize',
+    body: { result: { protocolVersion: '2025-06-18', capabilities, serverInfo: { name: 's', version: '1' } } },
+  });
+
+  it('checks the initialize result', async () => {
+    const result = (result: unknown): Sent => ({ from: 'server', kind: 'response', method: 'initialize', body: { result } });
+    expect(await run([result('x'), result({}), result({ protocolVersion: '1', capabilities: {}, serverInfo: { name: 1 } }), initialized()])).toEqual([
+      ['error result: initialize result must be an object'],
+      [
+        'error result.protocolVersion: initialize result needs a protocolVersion string',
+        'error result.capabilities: initialize result needs a capabilities object',
+        'error result.serverInfo: initialize result needs serverInfo with a name and version',
+      ],
+      ['error result.serverInfo.name: serverInfo needs a string name', 'error result.serverInfo.version: serverInfo needs a string version'],
+      [],
+    ]);
+  });
+
+  it('warns about requests sent before initialize was answered, pings aside', async () => {
+    const request = (method: string): Sent => ({ from: 'client', kind: 'request', method });
+    expect(await run([request('tools/list'), initialize(), request('ping'), request('tools/list'), initialized({ tools: {} }), request('tools/list')])).toEqual([
+      [],
+      [],
+      [],
+      ['warning method: tools/list was sent before the server answered initialize'],
+      [],
+      [],
+    ]);
+  });
+
+  it('checks requests against the capabilities the other side declared', async () => {
+    const client = (method: string): Sent => ({ from: 'client', kind: 'request', method });
+    const server = (method: string): Sent => ({ from: 'server', kind: 'request', method });
+    const issues = await run([
+      initialize({ roots: {} }),
+      initialized({ tools: {}, logging: {} }),
+      client('tools/list'),
+      client('logging/setLevel'),
+      client('resources/read'),
+      client('prompts/get'),
+      client('completion/complete'),
+      client('custom/thing'),
+      server('roots/list'),
+      server('sampling/createMessage'),
+      server('elicitation/create'),
+      server('ping'),
+    ]);
+    expect(issues.slice(2)).toEqual([
+      [],
+      [],
+      ['warning method: resources/read needs the "resources" capability, which the server didn\'t declare in initialize'],
+      ['warning method: prompts/get needs the "prompts" capability, which the server didn\'t declare in initialize'],
+      ['warning method: completion/complete needs the "completions" capability, which the server didn\'t declare in initialize'],
+      [],
+      [],
+      ['error method: sampling/createMessage needs the "sampling" capability, which the client didn\'t declare in initialize'],
+      ['error method: elicitation/create needs the "elicitation" capability, which the client didn\'t declare in initialize'],
+      [],
+    ]);
+  });
+
+  it('checks notifications against the capabilities their sender declared', async () => {
+    const notify = (from: 'client' | 'server', method: string): Sent => ({ from, kind: 'notification', method });
+    const issues = await run([
+      notify('server', 'notifications/tools/list_changed'),
+      initialize({ roots: { listChanged: true } }),
+      initialized({ tools: { listChanged: true }, resources: { subscribe: true }, prompts: 'x' }),
+      notify('server', 'notifications/tools/list_changed'),
+      notify('server', 'notifications/resources/updated'),
+      notify('server', 'notifications/resources/list_changed'),
+      notify('server', 'notifications/prompts/list_changed'),
+      notify('client', 'notifications/roots/list_changed'),
+      notify('server', 'notifications/message'),
+    ]);
+    expect(issues).toEqual([
+      [],
+      [],
+      [],
+      [],
+      [],
+      ['warning method: notifications/resources/list_changed needs "resources": { "listChanged": true } in the server\'s capabilities, which it didn\'t declare'],
+      ['warning method: notifications/prompts/list_changed needs "prompts": { "listChanged": true } in the server\'s capabilities, which it didn\'t declare'],
+      [],
+      [],
+    ]);
+  });
+
+  it("treats a malformed initialize as declaring nothing, and judges nothing of sessions it joined midway", async () => {
+    expect(
+      await run([
+        { from: 'client', kind: 'request', method: 'tools/call', body: { params: { name: 'x' } } },
+        { from: 'server', kind: 'request', method: 'sampling/createMessage' },
+        { from: 'client', kind: 'request', method: 'initialize', body: { params: { capabilities: 'x' } } },
+        { from: 'server', kind: 'response', method: 'initialize', body: { result: { capabilities: [] } } },
+        { from: 'server', kind: 'request', method: 'roots/list' },
+        { from: 'client', kind: 'request', method: 'prompts/list' },
+      ]),
+    ).toEqual([
+      [],
+      [],
+      [],
+      expect.arrayContaining(['error result.capabilities: initialize result needs a capabilities object']),
+      ['error method: roots/list needs the "roots" capability, which the client didn\'t declare in initialize'],
+      ['warning method: prompts/list needs the "prompts" capability, which the server didn\'t declare in initialize'],
+    ]);
+  });
+
+  it('checks resource and prompt results', async () => {
+    const reply = (method: string, result: unknown): Sent => ({ from: 'server', kind: 'response', method, body: { result } });
+    expect(
+      await run([
+        reply('resources/list', { resources: [{ uri: 'file:///a', name: 'a' }, { uri: 1 }, 'x'] }),
+        reply('resources/templates/list', { resourceTemplates: [{ uriTemplate: 'file:///{p}' }] }),
+        reply('resources/read', { contents: [{ uri: 'file:///a', text: 'hi' }, { uri: 'file:///b', blob: 'AA==' }, { uri: 'file:///c' }] }),
+        reply('prompts/list', { prompts: [{ name: 'p' }, {}] }),
+        reply('prompts/get', { messages: [{ role: 'user', content: { type: 'text', text: 'hi' } }, { role: 'system', content: { type: 'text' } }] }),
+        reply('prompts/get', null),
+        reply('ping', {}),
+      ]),
+    ).toEqual([
+      ['error result.resources[1].uri: needs a string "uri"', 'error result.resources[1].name: needs a string "name"', 'error result.resources[2]: resources entries must be objects'],
+      ['error result.resourceTemplates[0].name: needs a string "name"'],
+      ['error result.contents[2]: resource contents need text or blob'],
+      ['error result.prompts[1].name: needs a string "name"'],
+      ['error result.messages[1].role: role must be "user" or "assistant"', 'error result.messages[1].content.text: text content needs a string "text"'],
+      ['error result.messages: prompts/get result must have a messages array'],
+      [],
+    ]);
+  });
+
+  it('skips stderr, and payloads that are not JSON objects', async () => {
+    const { checkMessage } = await import('../src/validate.js');
+    const validator = new SessionValidator();
+    expect(checkMessage(validator, { direction: 'stderr', kind: 'log', method: 'x', payload: '{}' }, null)).toEqual([]);
+    expect(checkMessage(validator, { direction: 'client', kind: 'request', method: 'x', payload: '[]' }, null)).toEqual([]);
+  });
+});
