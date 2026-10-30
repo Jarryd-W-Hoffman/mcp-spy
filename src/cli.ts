@@ -16,6 +16,7 @@ import {
 } from './format.js';
 import { MockEngine, parseMockFile, rulesFromRecording, type MockFile, type MockTool } from './mocks.js';
 import { PolicyEngine } from './policy.js';
+import { suggestPolicy, type RecordedCall } from './policy-suggest.js';
 import { startHttpProxy, type HttpProxy } from './proxy/http.js';
 import { applyPrune, parseAge, parseRetention, parseSize, planPrune, type PruneRules } from './prune.js';
 import { compilePatterns, Redactor } from './redact.js';
@@ -53,6 +54,7 @@ Usage:
   mcpspy validate [--session <id>] [--db <path>]
   mcpspy mock serve <file> [--name <label>]  a fake MCP server driven by mock rules
   mcpspy mock add <file> <message-id>...     turn recorded calls into mock rules
+  mcpspy policy suggest [--session <id>]    draft a policy allowing what a session did
   mcpspy wrap [<config>] [--only <name>]... [--dry-run] [--command <path>] [--db <path>] [--mocks <file>] [--policy <file>]
   mcpspy unwrap [<config>] [--only <name>]... [--dry-run]
   mcpspy prune [--older-than <30d>] [--keep <n>] [--max-size <500MB>] [--dry-run] [--vacuum] [--db <path>]
@@ -132,6 +134,8 @@ export async function main(argv: string[]): Promise<void> {
       return validate(rest);
     case 'mock':
       return mockCommand(rest);
+    case 'policy':
+      return policyCommand(rest);
     case 'proxy':
       return proxyCommand(rest);
     case 'prune':
@@ -252,6 +256,37 @@ function loadMocks(path: string, serverName: string | null): MockEngine {
   } catch (error) {
     fail((error as Error).message);
   }
+}
+
+function policyCommand(argv: string[]): void {
+  const [sub, ...rest] = argv;
+  if (sub !== 'suggest') fail('policy takes one subcommand: suggest');
+  const { values } = parseArgs({ args: rest, options: { session: { type: 'string' }, db: { type: 'string' } } });
+  const store = new Store(values.db);
+  const sessionId = values.session !== undefined ? parseId(values.session, '--session') : store.listSessions(1)[0]?.id;
+  const session = sessionId !== undefined ? store.getSession(sessionId) : undefined;
+  if (!session) {
+    store.close();
+    fail(sessionId === undefined ? 'no sessions recorded yet' : `no session with id ${sessionId}`);
+  }
+
+  const calls: RecordedCall[] = [];
+  for (let after = 0, page: MessageRow[]; (page = store.messagesAfter(after, { sessionId: session.id })).length > 0; after = page.at(-1)!.id) {
+    for (const message of page) {
+      if (message.direction !== 'client' || message.kind !== 'request' || message.method !== 'tools/call') continue;
+      const params = (JSON.parse(message.payload) as { params?: { name?: unknown; arguments?: unknown } }).params;
+      if (typeof params?.name === 'string') calls.push({ name: params.name, arguments: params.arguments });
+    }
+  }
+  store.close();
+
+  const policy = suggestPolicy(calls, session.cwd);
+  process.stdout.write(`${JSON.stringify(policy, null, 2)}\n`);
+  const tools = policy.rules!.length;
+  process.stderr.write(
+    `Allows the ${tools} ${tools === 1 ? 'tool' : 'tools'} session #${session.id} called (${calls.length} ${calls.length === 1 ? 'call' : 'calls'}), and denies everything else.\n` +
+      'Review it before use: it allows what the session did, not what it should do.\n',
+  );
 }
 
 async function mockCommand(argv: string[]): Promise<void> {
