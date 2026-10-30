@@ -4,7 +4,7 @@ import type { Direction, MessageRow, SessionRow } from './types.js';
 /** First line of an export, so import can tell a log file from anything else. */
 const HEADER = { mcpspy: 'log', version: 1 };
 
-export type ExportedSession = Omit<SessionRow, 'checked'>;
+export type ExportedSession = Omit<SessionRow, 'checked' | 'imported'>;
 type Line = { session: ExportedSession } | { message: MessageRow };
 
 /**
@@ -16,7 +16,7 @@ export function exportSessions(store: Store, sessionIds: number[], write: (line:
   write(JSON.stringify(HEADER));
   let messages = 0;
   for (const id of sessionIds) {
-    const { checked: _checked, message_count: _count, ...session } = store.getSession(id) as SessionRow & { message_count?: number };
+    const { checked: _checked, imported: _imported, message_count: _count, ...session } = store.getSession(id) as SessionRow & { message_count?: number };
     write(JSON.stringify({ session } satisfies Line));
     for (let after = 0, page: MessageRow[]; (page = store.messagesAfter(after, { sessionId: id })).length > 0; after = page.at(-1)!.id) {
       for (const message of page) write(JSON.stringify({ message } satisfies Line));
@@ -62,7 +62,8 @@ const DIRECTIONS = new Set<string>(['client', 'server', 'stderr'] satisfies Dire
 const KINDS = new Set<string>(['request', 'response', 'error', 'notification', 'invalid', 'log'] satisfies MessageRow['kind'][]);
 
 /**
- * Reads an export into the log as new sessions, with new ids. References
+ * Reads an export into the log as new sessions, with new ids, marked as
+ * imported so nothing starts the servers they name (see assertRecordedHere). References
  * between the imported rows (a message's session and request, a replay's
  * original session) are carried over; references to rows outside the file are
  * dropped. One transaction: a bad line imports nothing.
@@ -99,7 +100,7 @@ export async function importSessions(store: Store, lines: AsyncIterable<string> 
     for (const row of rows) {
       if ('session' in row) {
         const { id, ended_at, exit_code, exit_signal, replay_of, ...session } = row.session;
-        const newId = store.createSession({ ...session, replay_of: replay_of === null ? null : (sessionIds.get(replay_of) ?? null) });
+        const newId = store.createSession({ ...session, imported: 1, replay_of: replay_of === null ? null : (sessionIds.get(replay_of) ?? null) });
         if (ended_at !== null) store.endSession(newId, { ended_at, exit_code, exit_signal });
         sessionIds.set(id, newId);
         created.push(newId);

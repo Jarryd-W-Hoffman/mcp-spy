@@ -67,6 +67,7 @@ const MIGRATIONS: [table: string, column: string, definition: string][] = [
   ['sessions', 'checked', 'INTEGER NOT NULL DEFAULT 0'],
   ['messages', 'mock', 'TEXT'],
   ['sessions', 'message_count', 'INTEGER NOT NULL DEFAULT 0'],
+  ['sessions', 'imported', 'INTEGER NOT NULL DEFAULT 0'],
 ];
 
 /**
@@ -91,6 +92,21 @@ const SQLITE_BUSY = 5;
 
 export function defaultDbPath(): string {
   return process.env.MCPSPY_DB ?? join(homedir(), '.mcpspy', 'mcpspy.db');
+}
+
+/**
+ * Throws when a session was imported, before anything starts its server: the
+ * command or URL came from someone else's file, and replaying it would run
+ * their program (or send your -H headers to their URL).
+ */
+export function assertRecordedHere(session: SessionRow, what: string): void {
+  if (session.imported !== 1) return;
+  const [target] = JSON.parse(session.command) as string[];
+  const how = session.transport === 'http' || session.transport === 'sse' ? `connect to ${target}` : `run ${session.command}`;
+  throw new Error(
+    `session #${session.id} was imported from a file, so mcpspy won't ${how} to ${what}. ` +
+      'Record the server yourself (mcpspy run or mcpspy proxy) and use that session.',
+  );
 }
 
 /**
@@ -158,14 +174,14 @@ export class Store {
 
   createSession(
     session: Pick<SessionRow, 'name' | 'transport' | 'command' | 'cwd' | 'pid' | 'started_at'> &
-      Partial<Pick<SessionRow, 'replay_of' | 'env_keys'>>,
+      Partial<Pick<SessionRow, 'replay_of' | 'env_keys' | 'imported'>>,
   ): number {
     const result = this.db
       .prepare(
-        `INSERT INTO sessions (name, transport, command, cwd, pid, started_at, replay_of, env_keys, checked)
-         VALUES (:name, :transport, :command, :cwd, :pid, :started_at, :replay_of, :env_keys, 1)`,
+        `INSERT INTO sessions (name, transport, command, cwd, pid, started_at, replay_of, env_keys, imported, checked)
+         VALUES (:name, :transport, :command, :cwd, :pid, :started_at, :replay_of, :env_keys, :imported, 1)`,
       )
-      .run({ replay_of: null, env_keys: null, ...session });
+      .run({ replay_of: null, env_keys: null, imported: 0, ...session });
     return Number(result.lastInsertRowid);
   }
 

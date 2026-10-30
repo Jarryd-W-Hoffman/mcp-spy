@@ -693,6 +693,7 @@ mcpspy import flaky-search.jsonl          # or: … | mcpspy import -
 
 - **They arrive as new sessions.** Imported sessions get new ids. The links between them come along: which response answers which request, and which session a replay came from. Links to sessions outside the file are dropped.
 - **Nothing is imported unless everything is.** Each line is checked, and the whole import runs in one transaction, so a bad line imports nothing and the error names the line.
+- **Imported servers are never started.** An imported session's command or URL came from someone else's file, so `mcpspy replay` and `mcpspy suite add` refuse it: replaying would run their program, or send your `-H` headers to their URL. Record the server yourself to replay its calls.
 - **Check an export before you share it.** Secrets mcpspy redacted while recording stay redacted, but tool arguments and results are included as recorded.
 
 ## How it's built

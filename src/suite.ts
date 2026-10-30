@@ -3,7 +3,7 @@ import { comparableBody, diffJson, type JsonChange } from './diff.js';
 import { requestSubject } from './format.js';
 import { HttpRpcClient } from './http-client.js';
 import { RpcClient, RpcError, StdioRpcClient, type JsonRpcReply } from './rpc-client.js';
-import type { Store } from './store.js';
+import { assertRecordedHere, type Store } from './store.js';
 import type { SessionRow } from './types.js';
 
 /**
@@ -60,6 +60,7 @@ export function addCases(suite: Suite, suitePath: string, store: Store, messageI
 
     const session = store.getSession(request.session_id)!;
     const origin = session.replay_of !== null ? store.getSession(session.replay_of)! : session;
+    assertRecordedHere(origin, 'add it to a suite');
     const serverKey = serverEntry(suite, suitePath, store, origin);
 
     const subject = requestSubject(request.method, request.payload);

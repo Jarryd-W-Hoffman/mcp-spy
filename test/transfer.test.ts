@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { Store } from '../src/store.js';
+import { replay, ReplayError } from '../src/replay.js';
+import { addCases, emptySuite } from '../src/suite.js';
 import { exportSessions, importSessions } from '../src/transfer.js';
 import type { NewMessage } from '../src/types.js';
 
@@ -66,6 +68,26 @@ describe('export and import', () => {
     // Exporting the copy gives the same file, ids aside.
     const withoutIds = (rows: string[]) => rows.map((row) => row.replace(/"(id|session_id|request_id|replay_of)":\d+/g, ''));
     expect(withoutIds(exported(to, [2, 3]))).toEqual(withoutIds(lines));
+  });
+
+  it("marks imported sessions, and won't start the servers they name", async () => {
+    const stdio = session(from, 'stdio');
+    const call = from.insertMessage(message(stdio));
+    from.insertMessage(message(stdio, { direction: 'server', kind: 'response', request_id: call, payload: '{"jsonrpc":"2.0","id":1,"result":{}}' }));
+    const http = from.createSession({ name: 'remote', transport: 'http', command: '["https://evil.example/mcp"]', cwd: '/', pid: null, started_at: 1 });
+    from.insertMessage(message(http));
+    const lines = exported(from, [stdio, http]);
+    expect(lines.join('\n')).not.toContain('imported');
+    await importSessions(to, lines);
+    expect([to.getSession(1)!.imported, to.getSession(2)!.imported, from.getSession(stdio)!.imported]).toEqual([1, 1, 0]);
+
+    await expect(replay({ store: to, messageId: 1 })).rejects.toThrow(
+      new ReplayError('session #1 was imported from a file, so mcpspy won\'t run ["srv"] to replay it. Record the server yourself (mcpspy run or mcpspy proxy) and use that session.'),
+    );
+    await expect(replay({ store: to, messageId: 3 })).rejects.toThrow("so mcpspy won't connect to https://evil.example/mcp to replay it");
+    expect(() => addCases(emptySuite(), '/w/suite.json', to, [1])).toThrow("so mcpspy won't run [\"srv\"] to add it to a suite");
+    // Nothing was started or recorded.
+    expect(to.listSessions().map((row) => row.id)).toEqual([2, 1]);
   });
 
   it('drops links to rows that are not in the file', async () => {
