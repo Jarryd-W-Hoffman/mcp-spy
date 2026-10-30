@@ -1,5 +1,6 @@
 import { existsSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
+import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 
 /**
@@ -360,6 +361,10 @@ export class PolicyEngine {
  * out of it. Relative paths are resolved against the server's directory.
  */
 export function isUnder(value: string, roots: string[], cwd: string): boolean {
+  // Servers commonly expand a leading ~ to the home directory (the reference
+  // filesystem server does), so read it as they would. ~user can't be read here.
+  if (value === '~' || value.startsWith('~/')) value = join(homedir(), value.slice(1));
+  else if (value.startsWith('~')) return false;
   let path: string;
   try {
     path = value.startsWith('file:') ? fileURLToPath(value) : resolve(cwd, value);
