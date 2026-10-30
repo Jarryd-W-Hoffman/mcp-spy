@@ -308,8 +308,10 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
     const verdict = policy!.check(message.method, message.params);
     if (verdict.allow) return null;
     const what = message.method === 'tools/call' ? `tools/call ${(message.params as { name: string }).name}` : message.method;
-    warn(`policy denied ${what} (${verdict.rule}): ${verdict.reason}`);
-    return { text: message.id !== undefined ? JSON.stringify(denial(message, verdict.reason)) : null, rule: `policy: ${verdict.rule}` };
+    // Asking needs a channel to the agent that HTTP replies don't give the proxy; refuse instead.
+    const reason = verdict.ask !== undefined ? `${verdict.reason}, but asking only works with mcpspy run` : verdict.reason;
+    warn(`policy denied ${what} (${verdict.rule}): ${reason}`);
+    return { text: message.id !== undefined ? JSON.stringify(denial(message, reason)) : null, rule: `policy: ${verdict.rule}` };
   }
 
   /** Records an event from the server and returns replacement text, if it had to change. */

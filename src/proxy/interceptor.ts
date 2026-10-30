@@ -12,9 +12,15 @@ export interface InterceptorOptions {
   /** Records a reply the proxy wrote itself, with the rule that wrote it. */
   recordReply(line: string, rule: string): void;
   warn(message: string): void;
+  /** How long an ask waits for the agent's user before refusing the call. */
+  askTimeoutMs?: number;
 }
 
+/** Longest a held call's arguments are shown in an ask. */
+const ASK_PREVIEW = 500;
+
 type Message = { id?: unknown; method?: unknown; params?: unknown; result?: unknown };
+type Settle = (approved: boolean, why: string) => void;
 
 /**
  * Handles stdio traffic line by line when the proxy has to act on it. A
@@ -34,6 +40,11 @@ export class Interceptor {
   private readonly delayed = new Map<string, string>();
   private pending = 0;
   private idle: (() => void) | null = null;
+  /** Whether the agent said, in initialize, that it can show elicitation requests to its user. */
+  private canAsk = false;
+  /** Asks awaiting the agent's answer, by the id the proxy gave them. */
+  private readonly asking = new Map<string, Settle>();
+  private asks = 0;
 
   constructor(private readonly options: InterceptorOptions) {}
 
@@ -57,19 +68,36 @@ export class Interceptor {
       if (replies.length > 0) this.reply(JSON.stringify(replies.map((item) => refusal(item.id, 'batched requests are not allowed by the policy'))), 'policy');
       return;
     }
+    // The agent's answer to an ask of ours: the server never sent it, so it never sees the answer.
+    if (isObject(message) && message.method === undefined && typeof message.id === 'string' && this.asking.has(message.id)) {
+      const accepted = isObject(message.result) && message.result.action === 'accept';
+      this.asking.get(message.id)!(accepted, accepted ? '' : 'the user declined');
+      return;
+    }
     if (!isObject(message) || typeof message.method !== 'string') return toServer(policy ? JSON.stringify(message) : line);
+    const request = message as Message & { method: string };
+    if (request.method === 'initialize') this.canAsk = isObject(request.params) && isObject(request.params.capabilities) && request.params.capabilities.elicitation !== undefined;
 
     if (policy) {
-      const verdict = policy.check(message.method, message.params);
+      const verdict = policy.check(request.method, request.params);
       if (!verdict.allow) {
-        const what = message.method === 'tools/call' ? `tools/call ${(message.params as { name: string }).name}` : message.method;
-        this.options.warn(`policy denied ${what} (${verdict.rule}): ${verdict.reason}`);
-        // A notification gets no answer; it just never arrives.
-        if (message.id !== undefined) this.reply(JSON.stringify(denial(message, verdict.reason)), `policy: ${verdict.rule}`);
+        const what = request.method === 'tools/call' ? `tools/call ${(request.params as { name: string }).name}` : request.method;
+        if (verdict.ask !== undefined && request.id !== undefined && this.canAsk) return this.ask(request, what, verdict.rule, verdict.ask);
+        const reason = verdict.ask !== undefined ? `${verdict.reason}, but the agent can't be asked` : verdict.reason;
+        this.refuse(request, what, verdict.rule, reason);
         return;
       }
-      line = JSON.stringify(message);
     }
+    this.forward(request, policy ? JSON.stringify(request) : line);
+  }
+
+  /** Refuses every call still waiting on an ask: the agent can't answer once its input has ended. */
+  inputEnded(): void {
+    for (const settle of [...this.asking.values()]) settle(false, 'the agent closed its input before answering');
+  }
+
+  private forward(message: Message & { method: string }, line: string): void {
+    const { toServer } = this.options;
     if (message.id === undefined) return toServer(line);
 
     const id = JSON.stringify(message.id);
@@ -129,6 +157,40 @@ export class Interceptor {
       }
     }
     return result === message.result ? { line, rule } : { line: JSON.stringify({ ...message, result }), rule };
+  }
+
+  private refuse(message: Message & { method: string }, what: string, rule: string, reason: string): void {
+    this.options.warn(`policy denied ${what} (${rule}): ${reason}`);
+    // A notification gets no answer; it just never arrives.
+    if (message.id !== undefined) this.reply(JSON.stringify(denial(message, reason)), `policy: ${rule}`);
+  }
+
+  /**
+   * Holds a call and asks the agent's user, through MCP elicitation, whether
+   * to let it through. Anything but an accept in time refuses it.
+   */
+  private ask(message: Message & { method: string }, what: string, rule: string, prompt: string): void {
+    const askId = `mcpspy-ask-${++this.asks}`;
+    const args = JSON.stringify(isObject(message.params) ? (message.params.arguments ?? message.params) : {});
+    const shown = args.length > ASK_PREVIEW ? `${args.slice(0, ASK_PREVIEW)}…` : args;
+    this.pending++;
+    const timer = setTimeout(() => settle(false, 'no answer in time'), this.options.askTimeoutMs ?? 120_000);
+    const settle: Settle = (approved, why) => {
+      clearTimeout(timer);
+      this.asking.delete(askId);
+      this.options.warn(`policy ${approved ? 'approved' : 'denied'} ${what} (${rule}) after asking${approved ? '' : `: ${why}`}`);
+      if (approved) this.forward(message, JSON.stringify(message));
+      else this.reply(JSON.stringify(denial(message, `${prompt} (${why})`)), `policy: ${rule}`);
+      if (--this.pending === 0) this.idle?.();
+    };
+    this.asking.set(askId, settle);
+    const request = {
+      jsonrpc: '2.0',
+      id: askId,
+      method: 'elicitation/create',
+      params: { message: `${prompt}\n\nmcpspy is holding ${what} ${shown}. Accept to let it through.`, requestedSchema: { type: 'object', properties: {} } },
+    };
+    this.reply(JSON.stringify(request), `policy: ${rule}`);
   }
 
   /** Calls `done` once no delayed request or reply is waiting to be sent. */

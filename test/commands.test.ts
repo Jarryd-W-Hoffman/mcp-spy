@@ -196,7 +196,7 @@ describe('mcpspy run', () => {
     const marker = join(folder, 'started');
     const broken = await cli(['run', '--db', db, '--policy', policy, '--', process.execPath, '-e', `require('fs').writeFileSync(${JSON.stringify(marker)}, '')`]);
     expect(broken.code).toBe(2);
-    expect(broken.stderr).toContain(`mcpspy: policy ${policy}: rules[0] needs exactly one of "allow": true or "deny": "<reason>"`);
+    expect(broken.stderr).toContain(`mcpspy: policy ${policy}: rules[0] needs exactly one of "allow": true, "deny": "<reason>" or "ask": "<prompt>"`);
     expect(existsSync(marker)).toBe(false);
   });
 

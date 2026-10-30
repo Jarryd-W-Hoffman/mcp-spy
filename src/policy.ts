@@ -27,6 +27,8 @@ export interface PolicyRule {
   allow?: true;
   /** Denies with this reason, shown to the agent. */
   deny?: string;
+  /** Holds the call and asks the agent's user, with this prompt, whether to let it through (stdio only). */
+  ask?: string;
   /** On allow rules: at most this many matching calls per period, e.g. "10/minute". */
   rate?: string;
 }
@@ -53,11 +55,15 @@ export interface ResultLimits {
   redact?: string[];
 }
 
-export type Verdict = { allow: true; rule: string | null } | { allow: false; rule: string; reason: string };
+/**
+ * An ask is a refusal that carries the prompt to ask with, so anything that
+ * can't ask refuses the call.
+ */
+export type Verdict = { allow: true; rule: string | null } | { allow: false; rule: string; reason: string; ask?: string };
 
 const PERIODS: Record<string, number> = { second: 1_000, minute: 60_000, hour: 3_600_000, day: 86_400_000 };
 const TESTS = ['under', 'in', 'match', 'notMatch', 'max', 'maxLength'];
-const RULE_KEYS = ['name', 'tool', 'method', 'server', 'where', 'allow', 'deny', 'rate'];
+const RULE_KEYS = ['name', 'tool', 'method', 'server', 'where', 'allow', 'deny', 'ask', 'rate'];
 
 interface CompiledRule {
   name: string;
@@ -66,6 +72,7 @@ interface CompiledRule {
   server: RegExp | null;
   where: [string[], CompiledTest][];
   deny: string | null;
+  ask: string | null;
   rate: { limit: number; periodMs: number; label: string } | null;
 }
 
@@ -130,8 +137,11 @@ function compileRule(raw: unknown, index: number, base: string): CompiledRule {
   }
   if (rule.allow !== undefined && rule.allow !== true) throw new Error(`${label}: "allow" must be true`);
   if (rule.deny !== undefined && (typeof rule.deny !== 'string' || rule.deny === '')) throw new Error(`${label}: "deny" must be a reason`);
-  if ((rule.allow === true) === (rule.deny !== undefined)) throw new Error(`${label} needs exactly one of "allow": true or "deny": "<reason>"`);
-  if (rule.rate !== undefined && rule.deny !== undefined) throw new Error(`${label}: "rate" only applies to allow rules`);
+  if (rule.ask !== undefined && (typeof rule.ask !== 'string' || rule.ask === '')) throw new Error(`${label}: "ask" must be a prompt`);
+  if ([rule.allow, rule.deny, rule.ask].filter((action) => action !== undefined).length !== 1) {
+    throw new Error(`${label} needs exactly one of "allow": true, "deny": "<reason>" or "ask": "<prompt>"`);
+  }
+  if (rule.rate !== undefined && rule.allow === undefined) throw new Error(`${label}: "rate" only applies to allow rules`);
 
   const where: [string[], CompiledTest][] = [];
   if (rule.where !== undefined) {
@@ -146,6 +156,7 @@ function compileRule(raw: unknown, index: number, base: string): CompiledRule {
     server: rule.server !== undefined ? glob(rule.server) : null,
     where,
     deny: rule.deny ?? null,
+    ask: rule.ask ?? null,
     rate: rule.rate !== undefined ? parseRate(rule.rate, label) : null,
   };
 }
@@ -234,10 +245,11 @@ export class PolicyEngine {
       if (!this.applies(rule, method, tool)) continue;
       const failed = rule.where.find(([path, test]) => !test(lookup(subject, path), this.cwd));
       if (failed) {
-        if (rule.deny === null) blocked ??= failed[0].join('.');
+        if (rule.deny === null && rule.ask === null) blocked ??= failed[0].join('.');
         continue;
       }
       if (rule.deny !== null) return { allow: false, rule: rule.name, reason: rule.deny };
+      if (rule.ask !== null) return { allow: false, rule: rule.name, reason: `needs approval (${rule.ask})`, ask: rule.ask };
       if (rule.rate && !this.withinRate(rule)) return { allow: false, rule: rule.name, reason: `rate limit of ${rule.rate.label} reached` };
       return { allow: true, rule: rule.name };
     }
@@ -286,6 +298,7 @@ export class PolicyEngine {
   private mayAllow(tool: string): boolean {
     for (const rule of this.policy.rules) {
       if (!this.applies(rule, 'tools/call', tool)) continue;
+      // Allowed outright, or perhaps once asked.
       if (rule.deny === null) return true;
       if (rule.where.length === 0) return false;
     }
