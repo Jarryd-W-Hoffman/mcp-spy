@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { createReadStream, existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { chmodSync, createReadStream, existsSync, readFileSync, realpathSync, renameSync, statSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { createInterface } from 'node:readline';
 import { parseArgs } from 'node:util';
@@ -1127,11 +1127,15 @@ function wrapCommand(argv: string[], mode: 'wrap' | 'unwrap'): void {
   }
 
   // Keep the file's indentation and final newline; write beside it and rename, so
-  // an agent reading the config never sees half of it.
+  // an agent reading the config never sees half of it. The rename lands on the real
+  // file, so a symlinked config (a dotfiles repo) stays a link, and the new file
+  // keeps the old one's mode: configs can hold API keys and be private.
   const indent = /^[ \t]+/m.exec(text)?.[0] ?? '  ';
-  const temporary = `${path}.mcpspy-${process.pid}`;
-  writeFileSync(temporary, JSON.stringify(changed.config, null, indent) + (text.endsWith('\n') ? '\n' : ''));
-  renameSync(temporary, path);
+  const target = realpathSync(path);
+  const temporary = `${target}.mcpspy-${process.pid}`;
+  writeFileSync(temporary, JSON.stringify(changed.config, null, indent) + (text.endsWith('\n') ? '\n' : ''), { mode: 0o600 });
+  chmodSync(temporary, statSync(target).mode & 0o7777);
+  renameSync(temporary, target);
   const servers = `${done.length} ${done.length === 1 ? 'server' : 'servers'}`;
   out(
     mode === 'wrap'

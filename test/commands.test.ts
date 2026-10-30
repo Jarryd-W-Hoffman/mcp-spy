@@ -1,8 +1,8 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, utimesSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { PassThrough } from 'node:stream';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { start } from '../src/cli.js';
@@ -1010,6 +1010,22 @@ describe('mcpspy wrap and unwrap', () => {
     expect(text.endsWith('}')).toBe(true);
     const unwrapped = await cli(['unwrap', path, '--only', 'a']);
     expect(unwrapped.stdout).toContain('Unwrapped 1 server in');
+  });
+
+  it("keeps a config's permissions, and a symlinked config a link", async () => {
+    for (const mode of [0o600, 0o644]) {
+      const path = config('{"mcpServers":{"a":{"command":"node","args":["a.js"]}}}');
+      chmodSync(path, mode);
+      expect((await cli(['wrap', path])).code).toBe(0);
+      expect(statSync(path).mode & 0o777).toBe(mode);
+    }
+    const real = config('{"mcpServers":{"a":{"command":"node","args":["a.js"]}}}');
+    const link = join(dir(), 'linked.json');
+    symlinkSync(real, link);
+    expect((await cli(['wrap', link])).code).toBe(0);
+    expect(lstatSync(link).isSymbolicLink()).toBe(true);
+    expect(readFileSync(real, 'utf8')).toContain('"run"');
+    expect(readdirSync(dirname(real))).toEqual(['mcp.json']);
   });
 
   it('adds a checked policy, by absolute path', async () => {
