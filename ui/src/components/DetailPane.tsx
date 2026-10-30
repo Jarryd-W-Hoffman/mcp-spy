@@ -113,7 +113,15 @@ export function DetailPane({ exchange, sessionName, compareBase, onCompareBase, 
 
       <div className="detail-body">
         {replaying && current?.request ? (
-          <ReplayPanel request={current.request} onDone={onReplayed} onCancel={() => setReplaying(false)} />
+          <ReplayPanel
+            request={current.request}
+            onDone={(outcome) => {
+              // The selection may not move (a run without a request), so close the editor here.
+              setReplaying(false);
+              onReplayed(outcome);
+            }}
+            onCancel={() => setReplaying(false)}
+          />
         ) : comparing && showDiff ? (
           <DiffView baseId={compareBase} targetId={exchange.id} />
         ) : (

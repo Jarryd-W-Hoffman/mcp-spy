@@ -574,7 +574,7 @@ Or delete the file to start over.
 | Validation | [Ajv](https://ajv.js.org) with [ajv-formats](https://github.com/ajv-validator/ajv-formats), for draft-07 and 2020-12 schemas |
 | Web UI | [React 19](https://react.dev) and [Vite 8](https://vite.dev), bundled into `dist/ui` and served by the CLI |
 | Exact token counts | [Anthropic TypeScript SDK](https://github.com/anthropics/anthropic-sdk-typescript), loaded only for `--exact` |
-| Tests | [Vitest](https://vitest.dev), against real child processes and real HTTP servers |
+| Tests | [Vitest](https://vitest.dev), against real child processes and real HTTP servers; the UI with [Testing Library](https://testing-library.com) in jsdom |
 
 ```text
 src/
@@ -658,6 +658,7 @@ Numbers vary from run to run and machine to machine; a laptop's clock speed alon
 
 ```sh
 npm test              # Vitest
+npm run test:coverage # the same, failing below 100% coverage (as CI does)
 npm run typecheck     # the CLI and the UI
 npm run build         # dist/ (CLI) and dist/ui (web UI)
 npm run dev -- tail   # run the CLI from source via tsx
@@ -668,11 +669,11 @@ npm run dev -- ui
 npm run dev:ui
 ```
 
-The tests run against real processes and sockets rather than mocks of them. A stdio fixture server (`test/fixtures/echo-server.mjs`) can echo, stall, ask the client for roots, and print junk to stdout on purpose. An HTTP fixture (`test/fixtures/http-server.ts`) speaks both Streamable HTTP and legacy SSE, including a mid-call request to the client.
+Every line, branch and function of the CLI and the UI is tested, and CI fails if coverage drops below 100%. The tests run against real processes and sockets rather than mocks of them. A stdio fixture server (`test/fixtures/echo-server.mjs`) can echo, stall, ask the client for roots, and print junk to stdout on purpose. An HTTP fixture (`test/fixtures/http-server.ts`) speaks both Streamable HTTP and legacy SSE, including a mid-call request to the client.
 
 [GitHub Actions](.github/workflows/tests.yml) runs on every push and pull request:
 
-- **Types, tests and the build** on Node **22.13.0** (the oldest version mcpspy supports, so the `engines` promise is checked) and Node **24**.
+- **Types, tests (with 100% coverage) and the build** on Node **22.13.0** (the oldest version mcpspy supports, so the `engines` promise is checked) and Node **24**.
 - A **smoke test** of the built CLI: proxy a real stdio server, then read the result back with `tail`.
 - **`npm audit`** for known vulnerabilities in dependencies.
 
@@ -682,7 +683,7 @@ Dependabot proposes grouped weekly updates for npm packages and GitHub Actions.
 
 Pull requests are welcome.
 - Work on a feature branch and keep commits small.
-- Each change comes with tests, and `npm test` and `npm run typecheck` should pass before you open a PR.
+- Each change comes with tests, and `npm run test:coverage` and `npm run typecheck` should pass before you open a PR.
 - If you change what's recorded, check an old log still opens: columns are added by migrations in `src/store.ts`, and older sessions are backfilled when a log is opened.
 
 ## License

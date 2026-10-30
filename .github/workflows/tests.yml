@@ -47,8 +47,9 @@ jobs:
       - name: Types
         run: npm run typecheck
 
+      # Fails below 100% line, branch and function coverage.
       - name: Tests
-        run: npm test
+        run: npm run test:coverage
 
       - name: Build
         run: npm run build
