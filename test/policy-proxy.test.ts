@@ -23,7 +23,7 @@ describe('redacting everything the server sends', () => {
     });
     const from = (message: unknown) => {
       const { line, rule } = interceptor.fromServer(JSON.stringify(message));
-      return { message: JSON.parse(line) as unknown, rule };
+      return { message: JSON.parse(line!) as unknown, rule };
     };
     return { interceptor, from };
   };
@@ -69,8 +69,8 @@ describe('redacting everything the server sends', () => {
     for (const results of [null, { maxBytes: 10 }]) {
       const { interceptor } = setup(results);
       const line = '{"jsonrpc":"2.0","method":"notifications/message","params":{"data":"sk-live6"}}';
-      expect(interceptor.fromServer(line)).toEqual({ line, rule: null });
-      expect(interceptor.fromServer('[1,{"jsonrpc":"2.0","id":3,"result":{}}]')).toEqual({ line: '[1,{"jsonrpc":"2.0","id":3,"result":{}}]', rule: null });
+      expect(interceptor.fromServer(line)).toEqual({ line, rule: null, answers: [] });
+      expect(interceptor.fromServer('[1,{"jsonrpc":"2.0","id":3,"result":{}}]')).toEqual({ line: '[1,{"jsonrpc":"2.0","id":3,"result":{}}]', rule: null, answers: [] });
     }
   });
 
@@ -82,6 +82,42 @@ describe('redacting everything the server sends', () => {
       message: { jsonrpc: '2.0', id: 1, result: { tools: [{ name: 'search', description: 'uses [redacted by policy]', inputSchema: { type: 'object' } }] } },
       rule: 'policy: hid delete',
     });
+  });
+});
+
+describe('checking what the server sends the agent', () => {
+  it('refuses requests and drops notifications a rule denies, in batches too', () => {
+    const warnings: string[] = [];
+    const file = {
+      default: 'allow',
+      rules: [
+        { name: 'small samples', method: 'sampling/createMessage', where: { maxTokens: { max: 1000 } }, allow: true },
+        { name: 'no sampling', method: 'sampling/createMessage', deny: 'too many tokens' },
+        { name: 'quiet', method: 'notifications/message', deny: 'no logs' },
+      ],
+    };
+    const interceptor = new Interceptor({
+      mocks: null,
+      policy: new PolicyEngine(null, 'echo', '/', () => {}, parsePolicy(JSON.stringify(file), '/')),
+      toServer: () => {},
+      toClient: () => {},
+      recordReply: () => {},
+      warn: (message) => warnings.push(message),
+    });
+    const sample = (id: number, maxTokens: number) => ({ jsonrpc: '2.0', id, method: 'sampling/createMessage', params: { messages: [], maxTokens } });
+    const small = JSON.stringify(sample(1, 500));
+    const refused = (id: number) => JSON.stringify({ jsonrpc: '2.0', id, error: { code: POLICY_ERROR, message: 'Blocked by mcpspy policy: too many tokens' } });
+    expect(interceptor.fromServer(small)).toEqual({ line: small, rule: null, answers: [] });
+    expect(interceptor.fromServer(JSON.stringify(sample(2, 5000)))).toEqual({ line: null, rule: 'policy: no sampling', answers: [refused(2)] });
+    expect(interceptor.fromServer(JSON.stringify({ jsonrpc: '2.0', method: 'notifications/message', params: { level: 'info', data: 'x' } }))).toEqual({
+      line: null,
+      rule: 'policy: quiet',
+      answers: [],
+    });
+    // A batch keeps what's allowed; the refused item is answered on its own.
+    const batch = interceptor.fromServer(JSON.stringify([sample(3, 5000), sample(4, 10)]));
+    expect([JSON.parse(batch.line!), batch.rule, batch.answers]).toEqual([[sample(4, 10)], 'policy: no sampling', [refused(3)]]);
+    expect(warnings).toContain('policy denied notifications/message from the server (quiet): no logs');
   });
 });
 
@@ -141,6 +177,24 @@ describe('stdio proxy with a policy', () => {
       .messagesAfter(0)
       .filter((message) => message.direction === 'server' && message.mock !== null)
       .map((message) => [message.rpc_id, message.mock]);
+
+  it('refuses requests the server sends the agent, answering the server itself', async () => {
+    const proxy = start({ default: 'allow', rules: [{ name: 'no roots', method: 'roots/list', deny: 'roots are private' }] });
+    proxy.send({ jsonrpc: '2.0', id: 0, method: 'initialize', params: {} });
+    await proxy.reply(0);
+    proxy.send(tool(1, 'roots'));
+    // The server got the refusal as its reply, and handed it back in the tool result.
+    expect(JSON.parse(text(await proxy.reply(1)))).toEqual({ code: POLICY_ERROR, message: 'Blocked by mcpspy policy: roots are private' });
+    expect(proxy.lines.some((line) => line.method === 'roots/list')).toBe(false);
+    await proxy.end();
+    expect(proxy.warnings()).toContain('[mcpspy] policy denied roots/list from the server (no roots): roots are private');
+    const recorded = store.messagesAfter(0).filter((message) => message.method === 'roots/list');
+    expect(recorded.map((message) => [message.direction, message.kind, message.mock])).toEqual([
+      ['server', 'request', 'policy: no roots'],
+      ['client', 'error', 'policy: no roots'],
+    ]);
+    expect(recorded[1]!.request_id).toBe(recorded[0]!.id);
+  });
 
   it('answers refused calls itself, forwards allowed ones and hides forbidden tools', async () => {
     const proxy = start({
