@@ -140,7 +140,15 @@ It lists the newest 50 matches (`-n` changes that) and exits with code 1 when no
 
 Headers such as `Authorization` are forwarded but never recorded. Replays and suites against servers that need them take the headers on the command line: `mcpspy replay 42 -H "Authorization: Bearer $TOKEN"`.
 
-**Servers that need a login.** Logging in with OAuth through the proxy doesn't work. The login service issues a token for the real server's URL, and the agent rejects it because it's talking to the proxy's URL. Instead, give the proxy a token, such as a personal access token or an API key. The proxy adds it to every request, replacing whatever the agent sends, so the agent never needs to log in:
+**Servers that need a login.** The agent can't log in with OAuth through the proxy: the login service issues a token for the real server's URL, and the agent rejects it because it's talking to the proxy's URL. So the proxy logs in instead. With `--login`, it opens the login page in your browser before it starts listening:
+
+```sh
+mcpspy proxy https://mcp.example.com/mcp --login
+```
+
+mcpspy finds the login service from the server's OAuth metadata, registers itself, and logs in with PKCE. Your browser comes back to a one-off page on `127.0.0.1`. The token is for the real server, it's kept in memory only, and it's added to every request in place of whatever the agent sends, so the agent never needs to log in. It's refreshed before it runs out. If the server refuses it, the proxy refreshes it, or opens the login page again, and the agent's next try gets the new one. The login service has to let clients register themselves (dynamic client registration), and use https unless it's on this machine.
+
+Or give the proxy a token yourself, such as a personal access token or an API key:
 
 ```sh
 mcpspy proxy https://api.githubcopilot.com/mcp/ --name github -H "Authorization: Bearer $GITHUB_TOKEN"
@@ -473,7 +481,7 @@ Patterns can't catch everything, such as a password in free text with nothing ar
 | `mcpspy wrap [<config>] [--only <name>] [--dry-run] [--command <path>] [--policy <file>]` | Put mcpspy in front of the stdio servers in an MCP config (`.mcp.json` by default). |
 | `mcpspy unwrap [<config>] [--only <name>] [--dry-run]` | Take it out again, restoring each server's command and args. |
 | `mcpspy run [--name <label>] [--policy <file>] [--mocks <file>] [--redact <regex>] [--no-redact] -- <cmd> [args…]` | Start a stdio server behind the proxy. `--policy` decides which calls the agent may make. `mcpspy -- <cmd>` is shorthand. |
-| `mcpspy proxy <url> [--port 7800] [--name <label>] [--policy <file>] [--mocks <file>] [-H 'Name: value']` | Proxy a server reached over HTTP (Streamable HTTP or HTTP+SSE). `-H` adds a header, such as a token, to every request. Takes `--redact` and `--no-redact` like `run`. |
+| `mcpspy proxy <url> [--port 7800] [--name <label>] [--policy <file>] [--mocks <file>] [-H 'Name: value'] [--login]` | Proxy a server reached over HTTP (Streamable HTTP or HTTP+SSE). `-H` adds a header, such as a token, to every request. `--login` logs in with OAuth in your browser and adds the token. Takes `--redact` and `--no-redact` like `run`. |
 | `mcpspy ui [--port 7777] [--open] [--read-only]` | Serve the web inspector on localhost, at the link it prints (it carries a new key each run). `--read-only` turns replay off. |
 | `mcpspy tail [-f] [-n 50] [--session <id>] [--json]` | Print recorded messages; `-f` follows new ones, `--json` prints NDJSON rows. |
 | `mcpspy sessions [--limit 20]` | List recorded sessions with their status and message count. |
@@ -847,7 +855,7 @@ Numbers vary from run to run and machine to machine; a laptop's clock speed alon
 ## Known limitations
 
 - **Not on npm yet.** Install from source for now.
-- **No OAuth login through `mcpspy proxy`.** The agent rejects a login for a URL other than the one it's using. Pass a token with `-H` instead; see [Servers over HTTP](#-servers-over-http).
+- **`--login` needs a login service that lets clients register themselves.** Services that need a client ID set up in advance aren't supported; pass a token with `-H` for those. The login lasts as long as the proxy, so each run logs in again.
 - **Replays from the UI can't send headers.** HTTP servers that need `Authorization` fail there with a 401 and a hint; use `mcpspy replay -H` instead.
 - **Mock rules apply to single requests.** Batched requests always go to the real server.
 - **Very large results are slower to pass through.** A 5 MB result takes a few hundred milliseconds longer, mostly to scan it for secrets. See [Performance](#performance).
