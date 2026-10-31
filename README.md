@@ -140,7 +140,15 @@ It lists the newest 50 matches (`-n` changes that) and exits with code 1 when no
 
 Headers such as `Authorization` are forwarded but never recorded. Replays and suites against servers that need them take the headers on the command line: `mcpspy replay 42 -H "Authorization: Bearer $TOKEN"`.
 
-**Servers that need a login.** Logging in with OAuth through the proxy doesn't work. The login service issues a token for the real server's URL, and the agent rejects it because it's talking to the proxy's URL. Instead, give the proxy a token, such as a personal access token or an API key. The proxy adds it to every request, replacing whatever the agent sends, so the agent never needs to log in:
+**Servers that need a login.** The agent can't log in with OAuth through the proxy: the login service issues a token for the real server's URL, and the agent rejects it because it's talking to the proxy's URL. So the proxy logs in instead. With `--login`, it opens the login page in your browser before it starts listening:
+
+```sh
+mcpspy proxy https://mcp.example.com/mcp --login
+```
+
+mcpspy finds the login service from the server's OAuth metadata, registers itself, and logs in with PKCE. Your browser comes back to a one-off page on `127.0.0.1`. The token is for the real server, it's kept in memory only, and it's added to every request in place of whatever the agent sends, so the agent never needs to log in. It's refreshed before it runs out. If the server refuses it, the proxy refreshes it, or opens the login page again, and the agent's next try gets the new one. The login service has to let clients register themselves (dynamic client registration), and use https unless it's on this machine.
+
+Or give the proxy a token yourself, such as a personal access token or an API key:
 
 ```sh
 mcpspy proxy https://api.githubcopilot.com/mcp/ --name github -H "Authorization: Bearer $GITHUB_TOKEN"
@@ -370,7 +378,9 @@ flowchart LR
     R -->|ask| Q["Hold the call, ask the<br/>agent's user (elicitation)"]
     Q -->|accept| F
     Q -->|"decline, no answer,<br/>or no way to ask"| D
-    S --> W["Redact matches in everything<br/>it sends (never the envelope)"] --> L{"Reply"}
+    S --> K{"Its own request or<br/>notification: a rule denies it?"}
+    K -->|"yes: answered with the reason,<br/>or a notification dropped"| S
+    K -->|no| W["Redact matches in everything<br/>it sends (never the envelope)"] --> L{"Reply"}
     L -->|tools/list| H["Hide tools no call<br/>could use"] --> A
     L -->|tool result| C["Cap the size"] --> A
     L -->|"anything else"| A
@@ -387,7 +397,15 @@ flowchart LR
 
   A missing argument fails every test.
 - **Default**: a tool call no rule matches is denied, unless the file says `"default": "allow"`. Other methods, such as `initialize` and `tools/list`, pass unless a rule names them.
-- **Asking**: an `ask` rule holds the call and asks the agent's user, through MCP elicitation, whether to let it through. The call goes ahead only if the user accepts. It's refused if they decline, if nobody answers within two minutes, or if the agent closes its connection first. If the agent cancels the call while it's held, the call is dropped and never runs, even if the user accepts afterwards. When an ask ends unanswered, the agent is told, so it can close its prompt. It's also refused if the agent didn't declare elicitation support, or if the server is behind `mcpspy proxy`: the HTTP proxy has no way to ask.
+- **What the server sends**: a rule naming a request or notification only servers send (`sampling/createMessage`, `elicitation/create`, `roots/list`, `notifications/message` and the server's other notifications) is checked on its way to the agent. A request a rule refuses never reaches the agent: mcpspy answers the server with the reason as a JSON-RPC error (`-32001`), so it isn't left waiting. A refused notification is dropped. `where` tests the request's params, so a server can sample with up to a set number of tokens, say:
+
+  ```json
+  { "method": "sampling/createMessage", "where": { "maxTokens": { "max": 1000 } }, "allow": true },
+  { "method": "sampling/createMessage", "deny": "sampling is limited to 1,000 tokens" }
+  ```
+
+  These can be allowed, denied or rate limited, but not asked about: the one to ask would be the agent the request is for. Methods both sides send, such as `ping`, are checked only when the agent sends them.
+- **Asking**: an `ask` rule holds the call and asks the agent's user, through MCP elicitation, whether to let it through. The call goes ahead only if the user accepts. It's refused if they decline, if nobody answers within two minutes, or if the agent closes its connection first. If the agent cancels the call while it's held, the call is dropped and never runs, even if the user accepts afterwards. When an ask ends unanswered, the agent is told, so it can close its prompt. It's also refused if the agent didn't declare elicitation support. Behind `mcpspy proxy`, the call's response becomes an event stream: the question goes out on it, the agent POSTs its answer to mcpspy (never to the server), and the call's reply or refusal follows on the same stream. So asking there needs an agent that accepts event streams, and Streamable HTTP: on the legacy HTTP+SSE transport, replies travel on a separate stream, and an `ask` refuses instead.
 - **Rates**: `rate` on an allow rule (`"10/minute"`, per `second`, `minute`, `hour` or `day`) refuses calls beyond the limit, over a sliding window.
 - **Tool lists** lose the tools no call could be allowed to use, so the agent doesn't plan around them. A tool that some arguments could unlock stays listed.
 - **Results**: `maxBytes` replaces an oversized tool result with an error. `redact` replaces matches in everything the server sends the agent: tool results and lists, resource contents, prompts, errors, log notifications and the server's own requests (such as `sampling/createMessage`), batches included. The JSON-RPC envelope (`jsonrpc`, `id`, `method`) is never changed, so a broad pattern can't break the protocol. This is unlike [Secrets](#-secrets), which only changes the record.
@@ -414,7 +432,6 @@ It allows what the session did, not what it should do, so review it before you r
 
 **It fails closed:**
 - **Broken policy:** mcpspy refuses to start the server, and `wrap` refuses to write the config.
-- **Rules that could never match** are broken too. A policy checks what the agent sends, so a rule naming a request only servers send (`sampling/createMessage`, `elicitation/create`, `roots/list`, or a server notification) is refused rather than silently ignored.
 - **Broken edit:** while running, the policy reloads when you save it. A broken edit keeps the old rules in force.
 - **Keep it out of the agent's reach.** The policy reloads when its file changes, so an agent that can write the file can change its own rules. If it sits where the servers work (beside `.mcp.json`, say), make sure no tool it allows can write it, as `write_*` is denied above. Otherwise keep it elsewhere, with absolute `under` paths. mcpspy warns when the file is inside the server's working directory or the config's directory.
 - **What the server sees:** the request exactly as it was checked, re-serialised. JSON with duplicate keys therefore can't show the policy one tool name and the server another.
@@ -464,7 +481,7 @@ Patterns can't catch everything, such as a password in free text with nothing ar
 | `mcpspy wrap [<config>] [--only <name>] [--dry-run] [--command <path>] [--policy <file>]` | Put mcpspy in front of the stdio servers in an MCP config (`.mcp.json` by default). |
 | `mcpspy unwrap [<config>] [--only <name>] [--dry-run]` | Take it out again, restoring each server's command and args. |
 | `mcpspy run [--name <label>] [--policy <file>] [--mocks <file>] [--redact <regex>] [--no-redact] -- <cmd> [args…]` | Start a stdio server behind the proxy. `--policy` decides which calls the agent may make. `mcpspy -- <cmd>` is shorthand. |
-| `mcpspy proxy <url> [--port 7800] [--name <label>] [--policy <file>] [--mocks <file>] [-H 'Name: value']` | Proxy a server reached over HTTP (Streamable HTTP or HTTP+SSE). `-H` adds a header, such as a token, to every request. Takes `--redact` and `--no-redact` like `run`. |
+| `mcpspy proxy <url> [--port 7800] [--name <label>] [--policy <file>] [--mocks <file>] [-H 'Name: value'] [--login]` | Proxy a server reached over HTTP (Streamable HTTP or HTTP+SSE). `-H` adds a header, such as a token, to every request. `--login` logs in with OAuth in your browser and adds the token. Takes `--redact` and `--no-redact` like `run`. |
 | `mcpspy ui [--port 7777] [--open] [--read-only]` | Serve the web inspector on localhost, at the link it prints (it carries a new key each run). `--read-only` turns replay off. |
 | `mcpspy tail [-f] [-n 50] [--session <id>] [--json]` | Print recorded messages; `-f` follows new ones, `--json` prints NDJSON rows. |
 | `mcpspy sessions [--limit 20]` | List recorded sessions with their status and message count. |
@@ -806,7 +823,7 @@ Run through `mcpspy run` and `mcpspy proxy`, the agent got the same results as w
 The same session ran again under a policy that denies `login`, allows `get_note` only up to id 50, asks before `summarize_notes`, and redacts GitHub tokens from what the agent receives:
 
 - **The agent never saw `login`:** the tool list it got had six tools, recorded as `[policy: hid login]`.
-- **Refusals arrived as tool errors with the reason**, over both transports: `only notes 1-50` for note 99, and `sign in yourself` for the login. The agent can't answer an ask, so `summarize_notes` was refused, and behind `mcpspy proxy` the reason says asking only works with `mcpspy run`.
+- **Refusals arrived as tool errors with the reason**, over both transports: `only notes 1-50` for note 99, and `sign in yourself` for the login. This agent doesn't declare elicitation, so it can't be asked, and `summarize_notes` was refused, saying so. (An agent that can be asked gets the question over either transport: the SDK's own client, accepting one ask and declining the next, saw its note saved and its summary refused.)
 - **The note came back with its token redacted** (`[policy: result redacted]`), while the allowed calls behaved as before.
 - **Policy placement:** copied into the server's working directory, the policy got a warning that the agent could rewrite it.
 - **Proxy targets:** requests aimed past the upstream (`GET http://…/mcp`, `//example.com/x`) got `400`.
@@ -838,12 +855,10 @@ Numbers vary from run to run and machine to machine; a laptop's clock speed alon
 ## Known limitations
 
 - **Not on npm yet.** Install from source for now.
-- **No OAuth login through `mcpspy proxy`.** The agent rejects a login for a URL other than the one it's using. Pass a token with `-H` instead; see [Servers over HTTP](#-servers-over-http).
+- **`--login` needs a login service that lets clients register themselves.** Services that need a client ID set up in advance aren't supported; pass a token with `-H` for those. The login lasts as long as the proxy, so each run logs in again.
 - **Replays from the UI can't send headers.** HTTP servers that need `Authorization` fail there with a 401 and a hint; use `mcpspy replay -H` instead.
 - **Mock rules apply to single requests.** Batched requests always go to the real server.
 - **Very large results are slower to pass through.** A 5 MB result takes a few hundred milliseconds longer, mostly to scan it for secrets. See [Performance](#performance).
-- **Policies check what the agent sends.** Requests the server sends the agent (sampling, elicitation, roots) can't be refused, though a policy's `redact` still applies to them. A rule naming one is rejected when the policy loads.
-- **`ask` rules need `mcpspy run`.** Behind `mcpspy proxy`, there's no way to ask the agent's user, so an `ask` rule refuses instead.
 - **Policies test values, not meaning.** A pattern such as `^select ` narrows what a query tool receives, but it isn't a SQL parser. For a hard guarantee, give the server credentials that can only read.
 - **Token estimates are estimates.** Use them to compare sizes, or `--exact` for real numbers.
 - **One log per machine by default.** Sessions from every project share `~/.mcpspy/mcpspy.db`; use `--db` or `MCPSPY_DB` to keep a project's traffic apart.

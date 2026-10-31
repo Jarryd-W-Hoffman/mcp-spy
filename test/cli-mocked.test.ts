@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Store } from '../src/store.js';
 import { cli } from './cli-harness.js';
+import { startOAuthFixture } from './fixtures/oauth-server.js';
 import { echoServer } from './helpers.js';
 
 // Opening a browser and calling the count_tokens API are replaced: tests must
@@ -66,6 +67,58 @@ describe('mcpspy ui --open', () => {
     const exited = new Promise<number>((resolve) => vi.spyOn(process, 'exit').mockImplementation(((code: number) => resolve(code)) as never));
     result.signals.get('SIGINT')!();
     await exited;
+  });
+});
+
+describe('mcpspy proxy --login', () => {
+  it('logs in in the browser before listening, and adds the token to every request', async () => {
+    const fixture = await startOAuthFixture();
+    spawned.length = 0;
+    try {
+      const running = cli(['proxy', fixture.url, '--port', '0', '--login', '--db', tmpDb()]);
+      // The "browser" follows the login page back to mcpspy.
+      await vi.waitFor(() => expect(spawned).toHaveLength(1));
+      await (await fetch(spawned[0]!.args[0]!)).text();
+      const result = await running;
+      expect(result.stderr).toContain(`log in to ${fixture.origin} in your browser`);
+      expect(result.stderr).toContain(`Logged in to ${fixture.origin}`);
+      expect(result.stderr).toContain('Adding Authorization (from --login) to every request (never recorded)');
+
+      const url = /Point your agent at (\S+)/.exec(result.stderr)![1]!;
+      const reply = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'ping' }) });
+      expect(await reply.json()).toEqual({ jsonrpc: '2.0', id: 1, result: { token: 'token-1' } });
+
+      const exited = new Promise<number>((resolve) => vi.spyOn(process, 'exit').mockImplementation(((code: number) => resolve(code)) as never));
+      result.signals.get('SIGINT')!();
+      expect(await exited).toBe(0);
+    } finally {
+      await fixture.close();
+    }
+  });
+
+  it("refuses a second Authorization, and stops when the login fails or the port's taken", async () => {
+    expect((await cli(['proxy', 'http://x/mcp', '--login', '-H', 'authorization: Bearer t'])).stderr).toContain('--login gets its own token; drop the Authorization header');
+    const fixture = await startOAuthFixture();
+    try {
+      fixture.challenge = null;
+      fixture.documents['/.well-known/oauth-protected-resource/mcp'] = undefined;
+      const failed = await cli(['proxy', fixture.url, '--port', '0', '--login', '--db', tmpDb()]);
+      expect([failed.code, failed.stderr]).toEqual([2, expect.stringContaining("couldn't log in: http://127.0.0.1:")]);
+
+      // Logged in, but the proxy can't listen: the login's callback is closed too.
+      fixture.challenge = `Bearer resource_metadata="${fixture.origin}/.well-known/oauth-protected-resource"`;
+      fixture.documents['/.well-known/oauth-protected-resource'] = { resource: fixture.url, authorization_servers: [fixture.origin] };
+      spawned.length = 0;
+      const running = cli(['proxy', fixture.url, '--port', String(new URL(fixture.url).port), '--login', '--db', tmpDb()]);
+      await vi.waitFor(() => expect(spawned).toHaveLength(1));
+      await (await fetch(spawned[0]!.args[0]!)).text();
+      const busy = await running;
+      expect([busy.code, busy.stderr]).toEqual([2, expect.stringContaining('is in use; pick another with --port')]);
+      const callback = new URL(spawned[0]!.args[0]!).searchParams.get('redirect_uri')!;
+      await expect(fetch(callback)).rejects.toThrow();
+    } finally {
+      await fixture.close();
+    }
   });
 });
 
