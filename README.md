@@ -432,6 +432,12 @@ The tools/list reply above lost `write_file` and `delete_branch`, which no rule 
     <img src="docs/policy-tools.png" alt="A tools/list response with write_file and delete_branch hidden by the policy." width="900">
 </p>
 
+An `ask` rule, as the log records it: mcpspy held `summarize_notes` and sent the agent an `elicitation/create` with the rule's prompt and the call it was holding. The user declined, so the call was refused (the **policy** row above it). The earlier `add_note` was accepted, and went through once the user answered:
+
+<p align="center">
+    <img src="docs/policy-ask.png" alt="An elicitation/create request from mcpspy asking whether to let summarize_notes through, answered with decline, and the refused summarize_notes call above it." width="900">
+</p>
+
 Policies work the same over HTTP: `mcpspy proxy <url> --policy policy.json` answers refusals itself, and filters and limits replies whether the server answers in JSON or over SSE. A remote server's working directory and home aren't known, so an `under` test there only accepts absolute paths and `file:` URIs.
 
 ### 🔒 Secrets
