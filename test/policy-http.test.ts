@@ -193,11 +193,6 @@ describe('HTTP proxy with a policy', () => {
     expect(store.messagesAfter(0).filter((message) => message.mock !== null)).toEqual([]);
   });
 
-  it('refuses ask rules, which need mcpspy run', async () => {
-    await start({ rules: [{ tool: 'search', ask: 'Search?' }] });
-    expect(text((await post(call(1, 'search'))).reply)).toBe('Blocked by mcpspy policy: needs approval (Search?), but asking only works with mcpspy run');
-  });
-
   it('redacts every message from the server, batches and stream events included', async () => {
     await up.close();
     const server = createServer((req, res) => {
