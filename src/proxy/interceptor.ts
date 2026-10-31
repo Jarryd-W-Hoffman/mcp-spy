@@ -1,5 +1,5 @@
 import type { MockEngine } from '../mocks.js';
-import type { PolicyEngine } from '../policy.js';
+import { sentByServer, type PolicyEngine } from '../policy.js';
 
 /** JSON-RPC error code for requests a policy refuses (in the implementation-defined server error range). */
 export const POLICY_ERROR = -32001;
@@ -130,20 +130,30 @@ export class Interceptor {
     }
   }
 
-  /** The line to forward to the client, and the rule that shaped it, if any. */
-  fromServer(line: string): { line: string; rule: string | null } {
+  /**
+   * The line to forward to the client, and the rule that shaped it, if any. The line is
+   * null when the policy refused everything in it: the agent never sees it. `answers`
+   * are the proxy's replies to the server's refused requests, for the caller to send
+   * once it has recorded the line they answer.
+   */
+  fromServer(line: string): { line: string | null; rule: string | null; answers: string[] } {
     let message: unknown;
     try {
       message = JSON.parse(line);
     } catch {
-      return { line, rule: null };
+      return { line, rule: null, answers: [] };
     }
+    const items = Array.isArray(message) ? message : [message];
+    const checked = items.map((item) => checkFromServer(this.options, item));
+    const answers = checked.flatMap((refused) => (refused?.answer ? [refused.answer] : []));
+    const kept = items.filter((_item, index) => checked[index] === null);
+    if (kept.length === 0) return { line: null, rule: checked[0]!.rule, answers };
     // A batch from the server is shaped item by item, so it can't carry anything past the policy.
-    const shaped = Array.isArray(message) ? message.map((item) => this.shape(item)) : [this.shape(message)];
-    const rule = shaped.find((item) => item.rule !== null)?.rule ?? null;
-    if (shaped.every((item, index) => item.message === (Array.isArray(message) ? message[index] : message))) return { line, rule };
+    const shaped = kept.map((item) => this.shape(item));
+    const rule = checked.find((refused) => refused !== null)?.rule ?? shaped.find((item) => item.rule !== null)?.rule ?? null;
+    if (kept.length === items.length && shaped.every((item, index) => item.message === kept[index])) return { line, rule, answers };
     const out = shaped.map((item) => item.message);
-    return { line: JSON.stringify(Array.isArray(message) ? out : out[0]), rule };
+    return { line: JSON.stringify(Array.isArray(message) ? out : out[0]), rule, answers };
   }
 
   /** One message from the server as the agent should get it, and the rule that changed it, if any. */
@@ -253,6 +263,23 @@ export function denial(message: { id?: unknown; method?: unknown }, reason: stri
     return { jsonrpc: '2.0', id: message.id, result: { content: [{ type: 'text', text: `Blocked by mcpspy policy: ${reason}` }], isError: true } };
   }
   return refusal(message.id, reason);
+}
+
+/**
+ * Checks a request or notification only servers send (sampling, elicitation, roots, …)
+ * against the policy (used by the HTTP proxy too). Null when it may reach the agent;
+ * otherwise the rule that refused it, and for a request, the refusal to answer the
+ * server with, so it isn't left waiting. A refused notification is just dropped.
+ */
+export function checkFromServer(
+  { policy, warn }: { policy: PolicyEngine | null; warn(message: string): void },
+  item: unknown,
+): { rule: string; answer: string | null } | null {
+  if (!policy || !isObject(item) || typeof item.method !== 'string' || !sentByServer(item.method)) return null;
+  const verdict = policy.check(item.method, item.params);
+  if (verdict.allow) return null;
+  warn(`policy denied ${item.method} from the server (${verdict.rule}): ${verdict.reason}`);
+  return { rule: `policy: ${verdict.rule}`, answer: item.id !== undefined ? JSON.stringify(refusal(item.id, verdict.reason)) : null };
 }
 
 export function refusal(id: unknown, reason: string): object {

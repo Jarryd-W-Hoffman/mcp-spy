@@ -370,7 +370,9 @@ flowchart LR
     R -->|ask| Q["Hold the call, ask the<br/>agent's user (elicitation)"]
     Q -->|accept| F
     Q -->|"decline, no answer,<br/>or no way to ask"| D
-    S --> W["Redact matches in everything<br/>it sends (never the envelope)"] --> L{"Reply"}
+    S --> K{"Its own request or<br/>notification: a rule denies it?"}
+    K -->|"yes: answered with the reason,<br/>or a notification dropped"| S
+    K -->|no| W["Redact matches in everything<br/>it sends (never the envelope)"] --> L{"Reply"}
     L -->|tools/list| H["Hide tools no call<br/>could use"] --> A
     L -->|tool result| C["Cap the size"] --> A
     L -->|"anything else"| A
@@ -387,6 +389,14 @@ flowchart LR
 
   A missing argument fails every test.
 - **Default**: a tool call no rule matches is denied, unless the file says `"default": "allow"`. Other methods, such as `initialize` and `tools/list`, pass unless a rule names them.
+- **What the server sends**: a rule naming a request or notification only servers send (`sampling/createMessage`, `elicitation/create`, `roots/list`, `notifications/message` and the server's other notifications) is checked on its way to the agent. A request a rule refuses never reaches the agent: mcpspy answers the server with the reason as a JSON-RPC error (`-32001`), so it isn't left waiting. A refused notification is dropped. `where` tests the request's params, so a server can sample with up to a set number of tokens, say:
+
+  ```json
+  { "method": "sampling/createMessage", "where": { "maxTokens": { "max": 1000 } }, "allow": true },
+  { "method": "sampling/createMessage", "deny": "sampling is limited to 1,000 tokens" }
+  ```
+
+  These can be allowed, denied or rate limited, but not asked about: the one to ask would be the agent the request is for. Methods both sides send, such as `ping`, are checked only when the agent sends them.
 - **Asking**: an `ask` rule holds the call and asks the agent's user, through MCP elicitation, whether to let it through. The call goes ahead only if the user accepts. It's refused if they decline, if nobody answers within two minutes, or if the agent closes its connection first. If the agent cancels the call while it's held, the call is dropped and never runs, even if the user accepts afterwards. When an ask ends unanswered, the agent is told, so it can close its prompt. It's also refused if the agent didn't declare elicitation support, or if the server is behind `mcpspy proxy`: the HTTP proxy has no way to ask.
 - **Rates**: `rate` on an allow rule (`"10/minute"`, per `second`, `minute`, `hour` or `day`) refuses calls beyond the limit, over a sliding window.
 - **Tool lists** lose the tools no call could be allowed to use, so the agent doesn't plan around them. A tool that some arguments could unlock stays listed.
@@ -414,7 +424,6 @@ It allows what the session did, not what it should do, so review it before you r
 
 **It fails closed:**
 - **Broken policy:** mcpspy refuses to start the server, and `wrap` refuses to write the config.
-- **Rules that could never match** are broken too. A policy checks what the agent sends, so a rule naming a request only servers send (`sampling/createMessage`, `elicitation/create`, `roots/list`, or a server notification) is refused rather than silently ignored.
 - **Broken edit:** while running, the policy reloads when you save it. A broken edit keeps the old rules in force.
 - **Keep it out of the agent's reach.** The policy reloads when its file changes, so an agent that can write the file can change its own rules. If it sits where the servers work (beside `.mcp.json`, say), make sure no tool it allows can write it, as `write_*` is denied above. Otherwise keep it elsewhere, with absolute `under` paths. mcpspy warns when the file is inside the server's working directory or the config's directory.
 - **What the server sees:** the request exactly as it was checked, re-serialised. JSON with duplicate keys therefore can't show the policy one tool name and the server another.
@@ -842,7 +851,6 @@ Numbers vary from run to run and machine to machine; a laptop's clock speed alon
 - **Replays from the UI can't send headers.** HTTP servers that need `Authorization` fail there with a 401 and a hint; use `mcpspy replay -H` instead.
 - **Mock rules apply to single requests.** Batched requests always go to the real server.
 - **Very large results are slower to pass through.** A 5 MB result takes a few hundred milliseconds longer, mostly to scan it for secrets. See [Performance](#performance).
-- **Policies check what the agent sends.** Requests the server sends the agent (sampling, elicitation, roots) can't be refused, though a policy's `redact` still applies to them. A rule naming one is rejected when the policy loads.
 - **`ask` rules need `mcpspy run`.** Behind `mcpspy proxy`, there's no way to ask the agent's user, so an `ask` rule refuses instead.
 - **Policies test values, not meaning.** A pattern such as `^select ` narrows what a query tool receives, but it isn't a SQL parser. For a hard guarantee, give the server credentials that can only read.
 - **Token estimates are estimates.** Use them to compare sizes, or `--exact` for real numbers.
