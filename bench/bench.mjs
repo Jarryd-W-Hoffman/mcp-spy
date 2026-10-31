@@ -2,7 +2,7 @@
 // Linux only (it reads mcpspy's memory and CPU time from /proc). Run npm run build first.
 //   npm run bench
 import { spawn } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { cpus, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
@@ -15,6 +15,17 @@ function mkdtemp() {
   return mkdtempSync(join(tmpdir(), 'mcpspy-bench-'));
 }
 const server = join(import.meta.dirname, 'notes-server.mjs');
+// A typical policy: every request is checked and re-serialised, and every result
+// limited and scanned for the policy's own patterns.
+const policy = join(dir, 'policy.json');
+writeFileSync(
+  policy,
+  JSON.stringify({
+    default: 'allow',
+    rules: [{ name: 'no logins', tool: 'login', deny: 'sign in yourself' }],
+    results: { maxBytes: 10 * 1024 * 1024, redact: ['acct-\\d{6}'] },
+  }),
+);
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /** Peak resident memory (MB) and CPU time used so far (ms) of a process, from /proc. */
@@ -65,12 +76,12 @@ async function workloads(client) {
   return results;
 }
 
-async function stdio(viaMcpspy) {
+async function stdio(viaMcpspy, withPolicy = false) {
   const db = join(dir, 'bench-stdio.db');
   rmSync(db, { force: true }); rmSync(`${db}-wal`, { force: true }); rmSync(`${db}-shm`, { force: true });
   const transport = new StdioClientTransport(
     viaMcpspy
-      ? { command: 'node', args: [cli, 'run', '--db', db, '--name', 'bench', '--', 'node', server, 'stdio'], stderr: 'ignore' }
+      ? { command: 'node', args: [cli, 'run', '--db', db, '--name', 'bench', ...(withPolicy ? ['--policy', policy] : []), '--', 'node', server, 'stdio'], stderr: 'ignore' }
       : { command: 'node', args: [server, 'stdio'], stderr: 'ignore' },
   );
   const client = new Client({ name: 'bench', version: '1' });
@@ -85,12 +96,12 @@ async function stdio(viaMcpspy) {
   return results;
 }
 
-async function http(viaMcpspy) {
+async function http(viaMcpspy, withPolicy = false) {
   const db = join(dir, 'bench-http.db');
   rmSync(db, { force: true }); rmSync(`${db}-wal`, { force: true }); rmSync(`${db}-shm`, { force: true });
   const upstream = spawn('node', [server, 'http', '7910'], { stdio: 'ignore' });
   await sleep(700);
-  const proxy = viaMcpspy ? spawn('node', [cli, 'proxy', 'http://127.0.0.1:7910/mcp', '--port', '7911', '--db', db, '--name', 'bench'], { stdio: 'ignore' }) : null;
+  const proxy = viaMcpspy ? spawn('node', [cli, 'proxy', 'http://127.0.0.1:7910/mcp', '--port', '7911', '--db', db, '--name', 'bench', ...(withPolicy ? ['--policy', policy] : [])], { stdio: 'ignore' }) : null;
   if (proxy) await sleep(800);
   const transport = new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${viaMcpspy ? 7911 : 7910}/mcp`));
   const client = new Client({ name: 'bench', version: '1' });
@@ -107,7 +118,15 @@ async function http(viaMcpspy) {
 }
 
 const all = {};
-for (const [name, run] of [['stdio direct', () => stdio(false)], ['stdio mcpspy', () => stdio(true)], ['http direct', () => http(false)], ['http mcpspy', () => http(true)]]) {
+const runs = [
+  ['stdio direct', () => stdio(false)],
+  ['stdio mcpspy', () => stdio(true)],
+  ['stdio mcpspy + policy', () => stdio(true, true)],
+  ['http direct', () => http(false)],
+  ['http mcpspy', () => http(true)],
+  ['http mcpspy + policy', () => http(true, true)],
+];
+for (const [name, run] of runs) {
   process.stderr.write(`running: ${name}\n`);
   all[name] = await run();
 }

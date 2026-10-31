@@ -370,10 +370,10 @@ flowchart LR
     R -->|ask| Q["Hold the call, ask the<br/>agent's user (elicitation)"]
     Q -->|accept| F
     Q -->|"decline, no answer,<br/>or no way to ask"| D
-    S --> L{"Reply"}
+    S --> W["Redact matches in everything<br/>it sends (never the envelope)"] --> L{"Reply"}
     L -->|tools/list| H["Hide tools no call<br/>could use"] --> A
-    L -->|tool result| C["Redact matches,<br/>cap the size"] --> A
-    L -->|other| A
+    L -->|tool result| C["Cap the size"] --> A
+    L -->|"anything else"| A
     D --> A
 ```
 
@@ -432,6 +432,12 @@ The tools/list reply above lost `write_file` and `delete_branch`, which no rule 
     <img src="docs/policy-tools.png" alt="A tools/list response with write_file and delete_branch hidden by the policy." width="900">
 </p>
 
+An `ask` rule, as the log records it: mcpspy held `summarize_notes` and sent the agent an `elicitation/create` with the rule's prompt and the call it was holding. The user declined, so the call was refused (the **policy** row above it). The earlier `add_note` was accepted, and went through once the user answered:
+
+<p align="center">
+    <img src="docs/policy-ask.png" alt="An elicitation/create request from mcpspy asking whether to let summarize_notes through, answered with decline, and the refused summarize_notes call above it." width="900">
+</p>
+
 Policies work the same over HTTP: `mcpspy proxy <url> --policy policy.json` answers refusals itself, and filters and limits replies whether the server answers in JSON or over SSE. A remote server's working directory and home aren't known, so an `under` test there only accepts absolute paths and `file:` URIs.
 
 ### 🔒 Secrets
@@ -459,7 +465,7 @@ Patterns can't catch everything, such as a password in free text with nothing ar
 | `mcpspy unwrap [<config>] [--only <name>] [--dry-run]` | Take it out again, restoring each server's command and args. |
 | `mcpspy run [--name <label>] [--policy <file>] [--mocks <file>] [--redact <regex>] [--no-redact] -- <cmd> [args…]` | Start a stdio server behind the proxy. `--policy` decides which calls the agent may make. `mcpspy -- <cmd>` is shorthand. |
 | `mcpspy proxy <url> [--port 7800] [--name <label>] [--policy <file>] [--mocks <file>] [-H 'Name: value']` | Proxy a server reached over HTTP (Streamable HTTP or HTTP+SSE). `-H` adds a header, such as a token, to every request. Takes `--redact` and `--no-redact` like `run`. |
-| `mcpspy ui [--port 7777] [--open] [--read-only]` | Serve the web inspector on localhost. `--read-only` turns replay off. |
+| `mcpspy ui [--port 7777] [--open] [--read-only]` | Serve the web inspector on localhost, at the link it prints (it carries a new key each run). `--read-only` turns replay off. |
 | `mcpspy tail [-f] [-n 50] [--session <id>] [--json]` | Print recorded messages; `-f` follows new ones, `--json` prints NDJSON rows. |
 | `mcpspy sessions [--limit 20]` | List recorded sessions with their status and message count. |
 | `mcpspy show <message-id>` | Pretty-print a message alongside its request or response. |
@@ -495,10 +501,10 @@ flowchart LR
     end
     A <-->|"stdin / stdout"| P1 <-->|"stdin / stdout"| S1
     A <-->|"HTTP + SSE"| P2 <-->|"HTTP + SSE"| S2
-    P1 -->|write| DB[("~/.mcpspy/mcpspy.db<br/>SQLite, WAL mode")]
+    P1 -->|write| DB[("~/.mcpspy/mcpspy.db<br/>SQLite, WAL mode, 0600")]
     P2 -->|write| DB
     DB -->|read| T["mcpspy tail · tokens ·<br/>validate · diff"]
-    DB <-->|"read · replay"| U["mcpspy ui<br/>(localhost:7777)"]
+    DB <-->|"read · replay"| U["mcpspy ui<br/>(localhost:7777, per-run key)"]
     U -->|server-sent events| B["Browser"]
 ```
 
@@ -626,6 +632,19 @@ To make that possible, SSE responses are forwarded **one event at a time** rathe
 ### The live UI
 
 `mcpspy ui` is a small `node:http` server plus a React app. Because the proxies are separate processes, the UI can't be told about new messages; it watches the log instead. One shared poller asks SQLite for rows past the last id it has seen (every 250 ms, an indexed query that costs almost nothing), and pushes them to every open browser tab over server-sent events. A tab that reconnects says which id it saw last and gets what it missed.
+
+Every request needs the key `mcpspy ui` made when it started, since anyone on the machine can reach loopback. The printed link carries it once:
+
+```mermaid
+sequenceDiagram
+    participant You as Your browser
+    participant UI as mcpspy ui
+    You->>UI: GET /?key=K (the printed link)
+    UI-->>You: 303 to /, Set-Cookie: mcpspy_key_7777=K (HttpOnly, SameSite=Strict)
+    You->>UI: GET /, /api/…, /api/events (the cookie goes along)
+    UI-->>You: 200
+    Note over You,UI: Without the cookie (another user, another site): 401
+```
 
 ### Token estimates
 
@@ -777,29 +796,42 @@ mcpspy sits in the path of every message, so it has to be cheap. Here's how it b
 
 Run through `mcpspy run` and `mcpspy proxy`, the agent got the same results as without mcpspy, over both transports:
 
-- **Every message was recorded:** 22 for the stdio session, including the server's stderr line, and 21 over HTTP. The latencies were right: the slow tool sleeps 150 ms and was recorded at 153 ms. The missing note was flagged as a tool error.
-- **No secrets were stored.** The GitHub token in the note, the password and the API key in the login reply appear nowhere in the log, including where the server echoed the token back. The agent still received every real value.
+- **Every message was recorded:** 22 for the stdio session, including the server's stderr line, and 21 over HTTP. The latencies were right: the slow tool sleeps 150 ms and was recorded at 152 ms over stdio and 154 ms over HTTP. The missing note was flagged as a tool error.
+- **No secrets were stored.** The GitHub token in the note, the password and the API key in the login reply appear nowhere in the log, including where the server echoed the token back. Neither do a token passed to the server as `--api-token <value>` and the `Authorization` header given to `mcpspy proxy -H`. The agent still received every real value.
+- **The log stayed private.** It was created `0600`, and a `~/.mcpspy` left `0775` was closed to `0700`.
 - **Validation caught a confused agent.** [`bench/bad-agent.mjs`](bench/bad-agent.mjs) sends a string where an integer belongs, leaves out a required field, and misspells a tool name. `mcpspy validate` reported all three against the server's own schemas, with clearer messages than the server's errors.
-- **Replay** re-ran a recorded search with new arguments against a fresh copy of the server, three times, and diffed the result against the original.
+- **Replay** re-ran a recorded search with new arguments against a fresh copy of the server, three times, and diffed the result against the original. For the session whose command line held the redacted `--api-token`, it refused and said why.
+- **Search and export** found the recorded traffic, and an export of both sessions (43 messages) imported into a fresh log intact.
+
+The same session ran again under a policy that denies `login`, allows `get_note` only up to id 50, asks before `summarize_notes`, and redacts GitHub tokens from what the agent receives:
+
+- **The agent never saw `login`:** the tool list it got had six tools, recorded as `[policy: hid login]`.
+- **Refusals arrived as tool errors with the reason**, over both transports: `only notes 1-50` for note 99, and `sign in yourself` for the login. The agent can't answer an ask, so `summarize_notes` was refused, and behind `mcpspy proxy` the reason says asking only works with `mcpspy run`.
+- **The note came back with its token redacted** (`[policy: result redacted]`), while the allowed calls behaved as before.
+- **Policy placement:** copied into the server's working directory, the policy got a warning that the agent could rewrite it.
+- **Proxy targets:** requests aimed past the upstream (`GET http://…/mcp`, `//example.com/x`) got `400`.
 
 ### Overhead
 
-[`bench/bench.mjs`](bench/bench.mjs) (`npm run bench`) sends the same workloads to the notes server directly and through mcpspy, over each transport. Medians of three runs on a laptop (8 × Intel i7-10510U, Node 24.21, Linux):
+[`bench/bench.mjs`](bench/bench.mjs) (`npm run bench`) sends the same workloads to the notes server directly, through mcpspy, and through mcpspy with a policy, over each transport. The policy is a typical one: it allows by default, denies one tool, and limits and scans every result for a pattern of its own. Medians of three runs on a laptop (8 × Intel i7-10510U, Node 24.21, Linux):
 
 | | p50 | p95 | p99 | calls/s, one at a time | calls/s, 64 at once | 100 KB result | 1 MB result | 5 MB result |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| stdio, direct | 0.17 ms | 0.80 ms | 0.94 ms | 4,258 | 29,047 | 1.2 ms | 17.6 ms | 175 ms |
-| stdio, through mcpspy | 0.33 ms | 0.68 ms | 1.29 ms | 2,662 | 6,657 | 3.2 ms | 42.7 ms | 383 ms |
-| HTTP, direct | 1.89 ms | 3.88 ms | 5.02 ms | 453 | 1,356 | 2.5 ms | 13.4 ms | 63 ms |
-| HTTP, through mcpspy | 2.74 ms | 6.49 ms | 8.27 ms | 286 | 1,286 | 7.8 ms | 52.8 ms | 485 ms |
+| stdio, direct | 0.10 ms | 0.17 ms | 0.26 ms | 8,938 | 47,682 | 0.7 ms | 9.4 ms | 107 ms |
+| stdio, through mcpspy | 0.15 ms | 0.26 ms | 0.39 ms | 5,701 | 9,226 | 3.0 ms | 33.8 ms | 302 ms |
+| stdio, through mcpspy with a policy | 0.26 ms | 0.38 ms | 0.54 ms | 3,689 | 6,629 | 4.0 ms | 52.3 ms | 375 ms |
+| HTTP, direct | 0.88 ms | 1.54 ms | 2.47 ms | 1,005 | 2,098 | 1.5 ms | 8.6 ms | 37 ms |
+| HTTP, through mcpspy | 1.47 ms | 2.06 ms | 2.51 ms | 640 | 1,787 | 5.3 ms | 45.7 ms | 368 ms |
+| HTTP, through mcpspy with a policy | 1.49 ms | 2.14 ms | 2.64 ms | 636 | 1,788 | 6.0 ms | 55.8 ms | 414 ms |
 
 The latency columns are for `ping`, a tool that answers immediately, so they show mcpspy's overhead with nothing else in the way. What this means in practice:
 
-- **Typical calls gain under a millisecond:** about 0.2 ms over stdio and 1 ms over HTTP. An agent waits seconds for each model turn, so this is invisible.
-- **Throughput tops out at thousands of calls a second.** Through mcpspy, stdio handled about 6,600 calls a second with 64 in flight; recording each message is the limit. Agents make a few calls a second.
-- **Large results cost the most.** mcpspy parses each message, scans it for secrets, estimates its tokens and stores it. That adds about 25–40 ms to a 1 MB result, and 200–400 ms to a 5 MB one. Most of it is the secret scan: recording a 5 MB result took 130 ms, of which 80 ms was redaction and 32 ms the token estimate.
-- **Memory:** about 80 MB during 5,000 ordinary calls. It peaked at about 235 MB in the benchmark, while handling the 5 MB results.
-- **The log:** about 190 bytes per small message. The benchmark's 16,754 messages took 53 MB, nearly all of it the large reports. Use [`mcpspy prune`](#keeping-it-small) to keep it in check.
+- **Typical calls gain well under a millisecond:** about 0.05 ms over stdio and 0.6 ms over HTTP. An agent waits seconds for each model turn, so this is invisible.
+- **A policy adds about 0.1 ms a call** over stdio, where it checks and re-serialises each request and checks each reply. Over HTTP it's lost in the noise.
+- **Throughput tops out at thousands of calls a second.** Through mcpspy, stdio handled about 9,200 calls a second with 64 in flight, and about 6,600 with a policy; recording each message is the limit. Agents make a few calls a second.
+- **Large results cost the most.** mcpspy parses each message, scans it for secrets, estimates its tokens and stores it. That adds about 25–40 ms to a 1 MB result, and 200–330 ms to a 5 MB one. A policy adds 10–20 ms and 40–70 ms more, to limit and scan the result again. Most of it is the secret scan: recording a 5 MB result took 145 ms, of which 92 ms was redaction and 25 ms the token estimate.
+- **Memory:** about 80 MB during 5,000 ordinary calls, 83 MB with a policy. It peaked at about 235 MB in the benchmark (245 MB with a policy) while handling the 5 MB results.
+- **The log:** about 190 bytes per small message. Each benchmark run's log reached 53 MB, nearly all of it the large reports. Use [`mcpspy prune`](#keeping-it-small) to keep it in check.
 
 Numbers vary from run to run and machine to machine; a laptop's clock speed alone moves them by tens of percent. Run `npm run bench` to measure yours.
 
@@ -810,6 +842,8 @@ Numbers vary from run to run and machine to machine; a laptop's clock speed alon
 - **Replays from the UI can't send headers.** HTTP servers that need `Authorization` fail there with a 401 and a hint; use `mcpspy replay -H` instead.
 - **Mock rules apply to single requests.** Batched requests always go to the real server.
 - **Very large results are slower to pass through.** A 5 MB result takes a few hundred milliseconds longer, mostly to scan it for secrets. See [Performance](#performance).
+- **Policies check what the agent sends.** Requests the server sends the agent (sampling, elicitation, roots) can't be refused, though a policy's `redact` still applies to them. A rule naming one is rejected when the policy loads.
+- **`ask` rules need `mcpspy run`.** Behind `mcpspy proxy`, there's no way to ask the agent's user, so an `ask` rule refuses instead.
 - **Policies test values, not meaning.** A pattern such as `^select ` narrows what a query tool receives, but it isn't a SQL parser. For a hard guarantee, give the server credentials that can only read.
 - **Token estimates are estimates.** Use them to compare sizes, or `--exact` for real numbers.
 - **One log per machine by default.** Sessions from every project share `~/.mcpspy/mcpspy.db`; use `--db` or `MCPSPY_DB` to keep a project's traffic apart.
