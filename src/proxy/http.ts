@@ -28,6 +28,8 @@ export interface HttpProxyOptions {
    * Authorization token, so the agent needn't log in). Never recorded.
    */
   headers?: Record<string, string>;
+  /** mcpspy's own OAuth login (`--login`): its token goes upstream, and a 401 renews it. Never recorded. */
+  login?: { header(): string; expired(): void };
   /** What to remove from the record; built-in secret patterns by default. */
   redactor?: Redactor;
   warn?: (message: string) => void;
@@ -288,6 +290,8 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
       res.writeHead(502, { 'content-type': 'text/plain' }).end(`mcpspy could not reach ${upstream.origin}: ${reason}`);
     });
     upstreamReq.on('response', (up) => {
+      // The token was refused (revoked, or expired early): renew it for the agent's retry.
+      if (up.statusCode === 401) options.login?.expired();
       const assigned = header(up.headers, 'mcp-session-id');
       if (assigned !== null && tracked && !bySessionHeader.has(assigned)) bySessionHeader.set(assigned, tracked);
 
@@ -375,13 +379,19 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
     upstreamReq.end(forwarded);
   }
 
+  /** The configured headers and the login's token, in place of the agent's. */
+  function addCredentials(headers: Record<string, string | string[]>): void {
+    for (const [name, value] of Object.entries(options.headers ?? {})) headers[name.toLowerCase()] = value;
+    if (options.login) headers.authorization = options.login.header();
+  }
+
   /** The agent's headers as sent upstream: end-to-end ones, the configured ones on top, and no compression. */
   function upstreamHeaders(agentHeaders: IncomingHttpHeaders): Record<string, string | string[]> {
     const headers: Record<string, string | string[]> = {};
     for (const [name, value] of Object.entries(agentHeaders)) {
       if (value !== undefined && endToEnd(agentHeaders, name) && name !== 'content-length') headers[name] = value;
     }
-    for (const [name, value] of Object.entries(options.headers ?? {})) headers[name.toLowerCase()] = value;
+    addCredentials(headers);
     headers['accept-encoding'] = 'identity'; // so bodies can be read on the way through
     return headers;
   }
@@ -579,7 +589,7 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
     for (const [name, value] of Object.entries(agentHeaders)) {
       if (value !== undefined && endToEnd(agentHeaders, name) && name !== 'content-length' && name !== 'last-event-id') headers[name] = value;
     }
-    for (const [name, value] of Object.entries(options.headers ?? {})) headers[name.toLowerCase()] = value;
+    addCredentials(headers);
     Object.assign(headers, { 'content-type': 'application/json', accept: 'application/json, text/event-stream', 'content-length': String(Buffer.byteLength(answer)) });
     const post = send(url, { method: 'POST', headers });
     post.on('response', (up) => {
