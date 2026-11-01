@@ -207,8 +207,6 @@ export class Interceptor {
    */
   private ask(message: Message & { method: string }, what: string, rule: string, prompt: string): void {
     const askId = `mcpspy-ask-${++this.asks}`;
-    const args = JSON.stringify(isObject(message.params) ? (message.params.arguments ?? message.params) : {});
-    const shown = args.length > ASK_PREVIEW ? `${args.slice(0, ASK_PREVIEW)}…` : args;
     this.pending++;
     const timer = setTimeout(() => settle(false, 'no answer in time'), this.options.askTimeoutMs ?? 120_000);
     const heldId = JSON.stringify(message.id);
@@ -228,13 +226,7 @@ export class Interceptor {
     };
     this.asking.set(askId, settle);
     this.held.set(heldId, askId);
-    const request = {
-      jsonrpc: '2.0',
-      id: askId,
-      method: 'elicitation/create',
-      params: { message: `${prompt}\n\nmcpspy is holding ${what} ${shown}. Accept to let it through.`, requestedSchema: { type: 'object', properties: {} } },
-    };
-    this.reply(JSON.stringify(request), `policy: ${rule}`);
+    this.reply(askRequest(askId, prompt, what, message.params), `policy: ${rule}`);
   }
 
   /** Calls `done` once no delayed request or reply is waiting to be sent. */
@@ -263,6 +255,18 @@ export function denial(message: { id?: unknown; method?: unknown }, reason: stri
     return { jsonrpc: '2.0', id: message.id, result: { content: [{ type: 'text', text: `Blocked by mcpspy policy: ${reason}` }], isError: true } };
   }
   return refusal(message.id, reason);
+}
+
+/** The elicitation request that asks the agent's user whether to let a held call through (used by the HTTP proxy too). */
+export function askRequest(askId: string, prompt: string, what: string, params: unknown): string {
+  const args = JSON.stringify(isObject(params) ? (params.arguments ?? params) : {});
+  const shown = args.length > ASK_PREVIEW ? `${args.slice(0, ASK_PREVIEW)}…` : args;
+  return JSON.stringify({
+    jsonrpc: '2.0',
+    id: askId,
+    method: 'elicitation/create',
+    params: { message: `${prompt}\n\nmcpspy is holding ${what} ${shown}. Accept to let it through.`, requestedSchema: { type: 'object', properties: {} } },
+  });
 }
 
 /**

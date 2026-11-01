@@ -397,7 +397,7 @@ flowchart LR
   ```
 
   These can be allowed, denied or rate limited, but not asked about: the one to ask would be the agent the request is for. Methods both sides send, such as `ping`, are checked only when the agent sends them.
-- **Asking**: an `ask` rule holds the call and asks the agent's user, through MCP elicitation, whether to let it through. The call goes ahead only if the user accepts. It's refused if they decline, if nobody answers within two minutes, or if the agent closes its connection first. If the agent cancels the call while it's held, the call is dropped and never runs, even if the user accepts afterwards. When an ask ends unanswered, the agent is told, so it can close its prompt. It's also refused if the agent didn't declare elicitation support, or if the server is behind `mcpspy proxy`: the HTTP proxy has no way to ask.
+- **Asking**: an `ask` rule holds the call and asks the agent's user, through MCP elicitation, whether to let it through. The call goes ahead only if the user accepts. It's refused if they decline, if nobody answers within two minutes, or if the agent closes its connection first. If the agent cancels the call while it's held, the call is dropped and never runs, even if the user accepts afterwards. When an ask ends unanswered, the agent is told, so it can close its prompt. It's also refused if the agent didn't declare elicitation support. Behind `mcpspy proxy`, the call's response becomes an event stream: the question goes out on it, the agent POSTs its answer to mcpspy (never to the server), and the call's reply or refusal follows on the same stream. So asking there needs an agent that accepts event streams, and Streamable HTTP: on the legacy HTTP+SSE transport, replies travel on a separate stream, and an `ask` refuses instead.
 - **Rates**: `rate` on an allow rule (`"10/minute"`, per `second`, `minute`, `hour` or `day`) refuses calls beyond the limit, over a sliding window.
 - **Tool lists** lose the tools no call could be allowed to use, so the agent doesn't plan around them. A tool that some arguments could unlock stays listed.
 - **Results**: `maxBytes` replaces an oversized tool result with an error. `redact` replaces matches in everything the server sends the agent: tool results and lists, resource contents, prompts, errors, log notifications and the server's own requests (such as `sampling/createMessage`), batches included. The JSON-RPC envelope (`jsonrpc`, `id`, `method`) is never changed, so a broad pattern can't break the protocol. This is unlike [Secrets](#-secrets), which only changes the record.
@@ -815,7 +815,7 @@ Run through `mcpspy run` and `mcpspy proxy`, the agent got the same results as w
 The same session ran again under a policy that denies `login`, allows `get_note` only up to id 50, asks before `summarize_notes`, and redacts GitHub tokens from what the agent receives:
 
 - **The agent never saw `login`:** the tool list it got had six tools, recorded as `[policy: hid login]`.
-- **Refusals arrived as tool errors with the reason**, over both transports: `only notes 1-50` for note 99, and `sign in yourself` for the login. The agent can't answer an ask, so `summarize_notes` was refused, and behind `mcpspy proxy` the reason says asking only works with `mcpspy run`.
+- **Refusals arrived as tool errors with the reason**, over both transports: `only notes 1-50` for note 99, and `sign in yourself` for the login. This agent doesn't declare elicitation, so it can't be asked, and `summarize_notes` was refused, saying so. (An agent that can be asked gets the question over either transport: the SDK's own client, accepting one ask and declining the next, saw its note saved and its summary refused.)
 - **The note came back with its token redacted** (`[policy: result redacted]`), while the allowed calls behaved as before.
 - **Policy placement:** copied into the server's working directory, the policy got a warning that the agent could rewrite it.
 - **Proxy targets:** requests aimed past the upstream (`GET http://…/mcp`, `//example.com/x`) got `400`.
@@ -851,7 +851,6 @@ Numbers vary from run to run and machine to machine; a laptop's clock speed alon
 - **Replays from the UI can't send headers.** HTTP servers that need `Authorization` fail there with a 401 and a hint; use `mcpspy replay -H` instead.
 - **Mock rules apply to single requests.** Batched requests always go to the real server.
 - **Very large results are slower to pass through.** A 5 MB result takes a few hundred milliseconds longer, mostly to scan it for secrets. See [Performance](#performance).
-- **`ask` rules need `mcpspy run`.** Behind `mcpspy proxy`, there's no way to ask the agent's user, so an `ask` rule refuses instead.
 - **Policies test values, not meaning.** A pattern such as `^select ` narrows what a query tool receives, but it isn't a SQL parser. For a hard guarantee, give the server credentials that can only read.
 - **Token estimates are estimates.** Use them to compare sizes, or `--exact` for real numbers.
 - **One log per machine by default.** Sessions from every project share `~/.mcpspy/mcpspy.db`; use `--db` or `MCPSPY_DB` to keep a project's traffic apart.
