@@ -106,8 +106,8 @@ export async function startHttpFixture(): Promise<{
       const asked = new Promise<Record<string, unknown>>((resolve) => waiting.set('ask-1', resolve));
       send({ jsonrpc: '2.0', id: 'ask-1', method: 'roots/list' });
       const reply = await asked;
-      const roots = (reply.result as { roots: unknown[] }).roots;
-      send({ jsonrpc: '2.0', id: message.id, result: { content: [{ type: 'text', text: `${roots.length} roots` }] } });
+      const answered = reply.error ? `refused: ${(reply.error as { message: string }).message}` : `${(reply.result as { roots: unknown[] }).roots.length} roots`;
+      send({ jsonrpc: '2.0', id: message.id, result: { content: [{ type: 'text', text: answered }] } });
       return void res.end();
     }
     res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify(await answer(message)));

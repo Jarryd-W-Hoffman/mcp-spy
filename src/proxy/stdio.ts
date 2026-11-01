@@ -122,9 +122,15 @@ export function runStdioProxy(options: StdioProxyOptions): Promise<StdioProxyRes
         record(() => recorder.frame('server', line));
         return;
       }
-      const { line: forwarded, rule } = interceptor.fromServer(line);
-      toClient(forwarded);
-      record(() => recorder.frame('server', forwarded, rule));
+      const { line: forwarded, rule, answers } = interceptor.fromServer(line);
+      // What the server sent is recorded even when the policy kept it from the agent,
+      // and before the proxy's answers to it, so they pair with what they answer.
+      if (forwarded !== null) toClient(forwarded);
+      record(() => recorder.frame('server', forwarded ?? line, rule));
+      for (const answer of answers) {
+        toServer(answer);
+        record(() => recorder.frame('client', answer, rule));
+      }
     });
     const fromStderr = new LineSplitter((line) => record(() => recorder.stderr(line)));
 

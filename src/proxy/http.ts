@@ -9,7 +9,7 @@ import { Redactor } from '../redact.js';
 import { isLoopbackHost } from '../server.js';
 import { formatSseEvent, SseParser, type SseEvent } from '../sse.js';
 import type { Store } from '../store.js';
-import { denial, refusal } from './interceptor.js';
+import { checkFromServer, denial, refusal } from './interceptor.js';
 
 export interface HttpProxyOptions {
   /** The real server's MCP endpoint, e.g. https://mcp.example.com/mcp. */
@@ -56,6 +56,8 @@ interface Tracked {
   lastSeen: number;
   /** HTTP exchanges in flight (requests awaiting a reply, open event streams); it never goes idle while one is. */
   busy: number;
+  /** Legacy transport: where the server's event stream said to POST messages. */
+  endpoint?: URL;
 }
 
 /**
@@ -297,7 +299,7 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
         const session = tracked;
         if (session) hold(session, res);
         const parser = new SseParser((event) => {
-          res.write(session ? (onServerEvent(session, event, target, req.headers.host) ?? event.raw) : event.raw);
+          res.write(session ? (onServerEvent(session, event, target, req.headers) ?? event.raw) : event.raw);
         });
         source.on('data', (chunk: Buffer) => parser.push(chunk));
         source.on('end', () => {
@@ -366,11 +368,13 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
   }
 
   /** Records an event from the server and returns replacement text, if it had to change. */
-  function onServerEvent(session: Tracked, event: SseEvent, target: URL, localHost?: string): string | null {
+  function onServerEvent(session: Tracked, event: SseEvent, target: URL, agentHeaders: IncomingHttpHeaders): string | null {
+    const localHost = agentHeaders.host;
     if (event.event === 'endpoint' && event.data !== null) {
       // Legacy transport: the stream names the URL to POST to. Route those POSTs to this session,
       // and point absolute URLs at the proxy instead of the server.
       const endpoint = new URL(event.data, target);
+      session.endpoint = endpoint;
       byEndpoint.set(`${endpoint.pathname}${endpoint.search}`, session);
       if (/^[a-z][a-z0-9+.-]*:/i.test(event.data) && endpoint.origin === upstream.origin && localHost) {
         return formatSseEvent({ event: 'endpoint', id: event.id, data: `http://${localHost}${endpoint.pathname}${endpoint.search}` });
@@ -380,9 +384,51 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
     if (event.event !== 'message' || event.data === null || event.data.trim() === '') return null;
     session.lastSeen = Date.now();
     const data = event.data;
-    const shaped = shapeReply(session, parseJson(data));
+    const parsed = parseJson(data);
+
+    // Requests and notifications only servers send pass the policy first; refused ones never reach the agent.
+    const items = Array.isArray(parsed) ? (parsed as unknown[]) : [parsed];
+    const checked = items.map((item) => checkFromServer({ policy, warn }, item));
+    const refusedBy = checked.find((refused) => refused !== null)?.rule;
+    if (refusedBy !== undefined) {
+      const kept = items.filter((_item, index) => checked[index] === null);
+      // A single message was refused whole; only a batch can have something left to forward.
+      const text = kept.length === 0 ? null : JSON.stringify(kept);
+      record(() => session.recorder.frame('server', text ?? data, refusedBy));
+      for (const refused of checked) if (refused?.answer) answerServer(session, refused.answer, refused.rule, session.endpoint ?? target, agentHeaders);
+      return text === null ? '' : formatSseEvent({ event: event.event, id: event.id, data: text });
+    }
+
+    const shaped = shapeReply(session, parsed);
     record(() => session.recorder.frame('server', shaped?.text ?? data, shaped?.rule ?? null));
     return shaped !== null ? formatSseEvent({ event: event.event, id: event.id, data: shaped.text }) : null;
+  }
+
+  /**
+   * Sends the server the proxy's answer to one of its requests, as the agent would:
+   * POSTed to the session's MCP endpoint with the agent's headers (session id, protocol
+   * version, its own credentials) and any configured ones. Only ever to the upstream's
+   * origin, so configured credentials go nowhere else.
+   */
+  function answerServer(session: Tracked, answer: string, rule: string, url: URL, agentHeaders: IncomingHttpHeaders): void {
+    record(() => session.recorder.frame('client', answer, rule));
+    if (url.origin !== upstream.origin) {
+      warn(`policy: can't answer the server at ${url.origin}; its request will go unanswered`);
+      return;
+    }
+    const headers: Record<string, string | string[]> = {};
+    for (const [name, value] of Object.entries(agentHeaders)) {
+      if (value !== undefined && endToEnd(agentHeaders, name) && name !== 'content-length' && name !== 'last-event-id') headers[name] = value;
+    }
+    for (const [name, value] of Object.entries(options.headers ?? {})) headers[name.toLowerCase()] = value;
+    Object.assign(headers, { 'content-type': 'application/json', accept: 'application/json, text/event-stream', 'content-length': String(Buffer.byteLength(answer)) });
+    const post = send(url, { method: 'POST', headers });
+    post.on('response', (up) => {
+      up.resume();
+      if (up.statusCode! >= 400) record(() => session.recorder.stderr(`[http] the server refused mcpspy's answer to its request: ${up.statusCode} ${up.statusMessage}`));
+    });
+    post.on('error', (error) => record(() => session.recorder.stderr(`[http] could not answer the server's request: ${error.message}`)));
+    post.end(answer);
   }
 
   function awaitingOf(session: Tracked): Map<string, 'list' | 'call'> {
