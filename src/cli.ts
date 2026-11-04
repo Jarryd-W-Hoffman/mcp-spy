@@ -4,6 +4,10 @@ import { resolve } from 'node:path';
 import { createInterface } from 'node:readline';
 import { parseArgs } from 'node:util';
 import { checkMessages, eventData, EXPORT_HEADER, parseAnchor, parseExport, verifyChain, type Anchor, type AuditEvent, type ChainReport } from './audit.js';
+import { assertSafeUrl, describeHead, followAudit, pushAudit } from './collect/push.js';
+import { machineStatus } from './collect/page.js';
+import { startCollector } from './collect/server.js';
+import { CollectorStore, defaultCollectorDbPath } from './collect/store.js';
 import { comparableBody, diffLines, hunks, jsonLines } from './diff.js';
 import {
   errorSummary,
@@ -68,6 +72,14 @@ Usage:
   mcpspy audit [--session <id>] [--denied] [-n <50>] [--json] [--db <path>]
   mcpspy audit verify [--anchor <seq:hash>] [--file <export>] [--db <path>]
   mcpspy audit export [--db <path>] > audit.jsonl
+  mcpspy audit push <collector-url> [--follow] [--interval <30>] [--insecure-http] [--db <path>]
+                                           send the trail to a collector (token in $MCPSPY_COLLECT_TOKEN)
+  mcpspy collect [--port <7900>] [--host <127.0.0.1>] [--tls-cert <file> --tls-key <file>] [--plain-http]
+                 [--silent-after <1h>] [--db <path>]   receive trails from many machines and show them
+  mcpspy collect add <machine> [--db <path>]   register a machine and print its token, once
+  mcpspy collect machines [--json] [--db <path>]
+  mcpspy collect revoke <machine> [--db <path>]
+  mcpspy collect verify [--db <path>]      re-check the chains the collector holds
   mcpspy prune [--older-than <30d>] [--keep <n>] [--max-size <500MB>] [--dry-run] [--vacuum] [--db <path>]
 
 mcpspy wrap puts mcpspy in front of every stdio server in an MCP config
@@ -100,7 +112,8 @@ prune leaves alone. See it with mcpspy audit, and check it with mcpspy audit ver
 --require-audit stops the session if that trail can't be written, rather than
 carrying on without it.
 Nothing leaves your machine, except with tokens --exact, which sends the recorded
-tool definitions and results to Anthropic's count_tokens API.`;
+tool definitions and results to Anthropic's count_tokens API, and audit push, which
+sends the audit trail (no arguments or results) to the collector you name.`;
 
 function version(): string {
   const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as { version: string };
@@ -163,6 +176,8 @@ export async function main(argv: string[]): Promise<void> {
       return importCommand(rest);
     case 'audit':
       return auditCommand(rest);
+    case 'collect':
+      return collectCommand(rest);
     case 'prune':
       return prune(rest);
     case 'wrap':
@@ -475,8 +490,9 @@ async function tail(argv: string[]): Promise<void> {
   });
 }
 
-function auditCommand(argv: string[]): void {
+function auditCommand(argv: string[]): void | Promise<void> {
   const [first, ...rest] = argv;
+  if (first === 'push') return auditPush(rest);
   if (first === 'verify') return auditVerify(rest);
   if (first === 'export') return auditExport(rest);
   const { values, positionals } = parseArgs({
@@ -484,7 +500,7 @@ function auditCommand(argv: string[]): void {
     allowPositionals: true,
     options: { session: { type: 'string' }, denied: { type: 'boolean' }, n: { type: 'string', short: 'n', default: '50' }, json: { type: 'boolean' }, db: { type: 'string' } },
   });
-  if (positionals.length > 0) fail(`unknown audit command "${positionals[0]}". Use verify or export, or no command to list events.`);
+  if (positionals.length > 0) fail(`unknown audit command "${positionals[0]}". Use verify, export or push, or no command to list events.`);
   const sessionId = values.session !== undefined ? parseId(values.session, '--session') : undefined;
   const limit = parseId(values.n, '-n');
   const store = new Store(values.db);
@@ -569,6 +585,166 @@ function auditExport(argv: string[]): void {
   }
   store.close();
   process.stderr.write(`Exported ${plural(count, 'audit event')}. Check it with mcpspy audit verify --file <file>.\n`);
+}
+
+async function auditPush(argv: string[]): Promise<void> {
+  const { values, positionals } = parseArgs({
+    args: argv,
+    allowPositionals: true,
+    options: { follow: { type: 'boolean' }, interval: { type: 'string', default: '30' }, 'insecure-http': { type: 'boolean' }, db: { type: 'string' } },
+  });
+  if (positionals.length !== 1) fail('audit push needs the collector\'s URL, e.g. mcpspy audit push https://audit.example.com');
+  const url = positionals[0]!;
+  const token = process.env.MCPSPY_COLLECT_TOKEN;
+  // Not a flag: command lines show up in process lists and shell history.
+  if (!token) fail('audit push reads its token from MCPSPY_COLLECT_TOKEN; get one with mcpspy collect add <machine> on the collector');
+  const intervalSeconds = parseId(values.interval, '--interval');
+  if (intervalSeconds < 1) fail('--interval must be at least 1 second');
+  try {
+    assertSafeUrl(url, values['insecure-http'] === true);
+  } catch (error) {
+    fail((error as Error).message);
+  }
+  const store = new Store(values.db);
+  if (values.follow) {
+    const stop = new AbortController();
+    process.once('SIGINT', () => stop.abort());
+    process.once('SIGTERM', () => stop.abort());
+    process.stderr.write(`Pushing to ${url} every ${intervalSeconds}s. Stop with Ctrl-C.\n`);
+    await followAudit(store, { url, token, intervalMs: intervalSeconds * 1000, signal: stop.signal, log: (message) => process.stderr.write(`[mcpspy] ${message}\n`) });
+    store.close();
+    return;
+  }
+  let result;
+  try {
+    result = await pushAudit(store, { url, token });
+  } catch (error) {
+    store.close();
+    fail(`couldn't push: ${(error as Error).message}`);
+  }
+  store.close();
+  for (const problem of result.problems) process.stdout.write(`  ✗ ${problem}\n`);
+  if (result.problems.length > 0) {
+    process.stdout.write('The collector flagged this chain and kept what it already had.\n');
+    process.exitCode = 1;
+    return;
+  }
+  process.stdout.write(`Sent ${plural(result.sent, 'event')}. The collector is at ${describeHead(result.head)}.\n`);
+}
+
+function collectCommand(argv: string[]): void | Promise<void> {
+  const [first, ...rest] = argv;
+  switch (first) {
+    case 'add':
+    case 'revoke': {
+      const { values, positionals } = parseArgs({ args: rest, allowPositionals: true, options: { db: { type: 'string' } } });
+      if (positionals.length !== 1) fail(`collect ${first} needs a machine name`);
+      const name = positionals[0]!;
+      const store = new CollectorStore(values.db);
+      try {
+        if (first === 'add') {
+          if (store.machines().some((machine) => machine.name === name)) fail(`there's already a machine named ${name}. Its token can't be shown again: pick a new name for a new chain`);
+          const token = store.addMachine(name);
+          process.stderr.write(`Added ${name}. This token is shown once, and only its hash is kept. On that machine, set:\n`);
+          process.stdout.write(`MCPSPY_COLLECT_TOKEN=${token}\n`);
+        } else if (store.revokeMachine(name)) {
+          process.stdout.write(`Revoked ${name}. It can't push any more; what it sent stays.\n`);
+        } else {
+          fail(`no active machine named ${name}`);
+        }
+      } finally {
+        store.close();
+      }
+      return;
+    }
+    case 'machines':
+      return collectMachines(rest);
+    case 'verify':
+      return collectVerify(rest);
+    default:
+      return collectServe(argv);
+  }
+}
+
+function collectMachines(argv: string[]): void {
+  const { values } = parseArgs({ args: argv, options: { json: { type: 'boolean' }, db: { type: 'string' } } });
+  const store = new CollectorStore(values.db);
+  const machines = store.machines();
+  store.close();
+  const out = (line: string) => process.stdout.write(`${line}\n`);
+  if (values.json) {
+    out(JSON.stringify(machines));
+    return;
+  }
+  if (machines.length === 0) {
+    out('No machines yet. Add one with mcpspy collect add <name>.');
+    return;
+  }
+  for (const machine of machines) {
+    out(`${machine.name.padEnd(20)} ${machineStatus(machine, Date.now(), 60 * 60 * 1000).padEnd(8)} ${plural(machine.head_seq, 'event')}, ${machine.denied} denied, ${plural(machine.incidents, 'incident')}  ${machine.head_hash ? `anchor ${machine.head_seq}:${machine.head_hash}` : ''}`.trimEnd());
+  }
+}
+
+function collectVerify(argv: string[]): void {
+  const { values } = parseArgs({ args: argv, options: { db: { type: 'string' } } });
+  const store = new CollectorStore(values.db);
+  const results = store.verify();
+  store.close();
+  const out = (line: string) => process.stdout.write(`${line}\n`);
+  if (results.length === 0) {
+    out('No machines to verify.');
+    return;
+  }
+  for (const { machine, report } of results) {
+    out(report.problems.length === 0 ? `${machine}: intact, ${plural(report.count, 'event')}` : `${machine}: FAILED: ${report.problems.join('; ')}`);
+    if (report.problems.length > 0) process.exitCode = 1;
+  }
+}
+
+async function collectServe(argv: string[]): Promise<void> {
+  const { values, positionals } = parseArgs({
+    args: argv,
+    allowPositionals: true,
+    options: {
+      port: { type: 'string', default: '7900' },
+      host: { type: 'string', default: '127.0.0.1' },
+      'tls-cert': { type: 'string' },
+      'tls-key': { type: 'string' },
+      'plain-http': { type: 'boolean' },
+      'silent-after': { type: 'string', default: '1h' },
+      db: { type: 'string' },
+    },
+  });
+  if (positionals.length > 0) fail(`unknown collect command "${positionals[0]}". Use add, machines, revoke or verify, or no command to serve.`);
+  if ((values['tls-cert'] === undefined) !== (values['tls-key'] === undefined)) fail('--tls-cert and --tls-key go together');
+  const tls = values['tls-cert'] !== undefined ? { cert: readFileSync(values['tls-cert']), key: readFileSync(values['tls-key']!) } : undefined;
+  if (!isLoopbackHost(values.host) && !tls && !values['plain-http']) {
+    fail(`--host ${values.host} would take tokens and audit trails unencrypted. Add --tls-cert and --tls-key, or --plain-http if something in front of the collector handles TLS.`);
+  }
+  let silentAfterMs: number;
+  try {
+    silentAfterMs = parseAge(values['silent-after']);
+  } catch (error) {
+    fail((error as Error).message);
+  }
+  const port = parseId(values.port, '--port');
+  const store = new CollectorStore(values.db);
+  // A fixed key lets a deployment keep its link across restarts; otherwise each run makes a new one.
+  const viewKey = process.env.MCPSPY_COLLECT_VIEW_KEY || crypto.randomUUID().replaceAll('-', '');
+  const collector = await startCollector({ store, host: values.host, port, viewKey, tls, silentAfterMs }).catch((error: NodeJS.ErrnoException) => {
+    store.close();
+    if (error.code === 'EADDRINUSE') fail(`port ${values.port} is in use; pick another with --port`);
+    throw error;
+  });
+  process.stdout.write(`mcpspy collector on ${collector.url}?key=${viewKey}  (data: ${values.db ?? defaultCollectorDbPath()})\n`);
+  const stop = () => {
+    void collector.close().then(() => {
+      store.close();
+      process.exit(0);
+    });
+  };
+  process.once('SIGINT', stop);
+  process.once('SIGTERM', stop);
 }
 
 function exportCommand(argv: string[]): void {

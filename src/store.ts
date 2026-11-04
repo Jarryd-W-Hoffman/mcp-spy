@@ -117,7 +117,7 @@ const SQLITE_BUSY = 5;
  * the directory of a log kept elsewhere (it could be /tmp). A file someone
  * else owns can't be changed, and is left as it is.
  */
-function keepPrivate(path: string): void {
+export function keepPrivate(path: string): void {
   const change = (target: string, mode: number) => {
     try {
       chmodSync(target, mode);
@@ -521,16 +521,24 @@ export class Store {
     return row?.seq ?? 0;
   }
 
-  /** Every event in chain order, read in pages so a long chain doesn't sit in memory. */
-  *auditEvents(batch = 1000): Generator<AuditEvent> {
+  /** Up to `limit` events after `from` in chain order, read in pages so a long chain doesn't sit in memory. */
+  *auditEvents(batch = 1000, from = 0, limit = Number.MAX_SAFE_INTEGER): Generator<AuditEvent> {
     const page = this.db.prepare('SELECT * FROM audit_events WHERE seq > ? ORDER BY seq LIMIT ?');
-    let after = 0;
+    let after = from;
+    let left = limit;
     for (;;) {
-      const rows = page.all(after, batch) as unknown as AuditEvent[];
+      const rows = page.all(after, Math.min(batch, left)) as unknown as AuditEvent[];
       yield* rows;
-      if (rows.length < batch) return;
+      left -= rows.length;
+      if (rows.length < batch || left === 0) return;
       after = rows[rows.length - 1]!.seq;
     }
+  }
+
+  /** The last event in the chain, if any. */
+  auditHead(): { seq: number; hash: string } | null {
+    const row = this.db.prepare('SELECT seq, hash FROM audit_events ORDER BY seq DESC LIMIT 1').get() as { seq: number; hash: string } | undefined;
+    return row ? { seq: row.seq, hash: row.hash } : null;
   }
 
   /** The latest events, oldest of them first. */

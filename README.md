@@ -41,7 +41,8 @@ MCP traffic is invisible. The agent says "the tool failed", or quietly picks the
 - **Decide what an agent may do.** A policy allows or refuses each call, with tests on its arguments (paths stay inside a folder, values match a pattern), rate limits, and limits on what results the agent sees.
 - **Prove what happened.** With a policy, each decision goes on a hash-chained audit trail: who ran the session, what the agent called, which rule and exact policy decided, and how it ended. It outlives `prune`, and `mcpspy audit verify` shows if it was changed.
 - **Fake what isn't there.** Answer calls from mock rules (outages, rate limits, slow responses, bad payloads) to see how an agent copes, or stand in for a server that doesn't exist yet.
-- **Nothing leaves your machine, and secrets stay out of the log.** The log is a SQLite file in your home folder. The UI and proxy only listen on localhost. Tokens and passwords in the traffic are replaced with `[REDACTED]` before they're stored. Environment variable values and HTTP headers such as `Authorization` are never recorded.
+- **See every machine at once.** `mcpspy collect` gathers audit trails from a team's machines into one self-hosted view, keeps its own copy, and flags any machine whose chain no longer matches.
+- **Nothing leaves your machine unless you send it, and secrets stay out of the log.** The log is a SQLite file in your home folder. The UI and proxy only listen on localhost. Tokens and passwords in the traffic are replaced with `[REDACTED]` before they're stored. Environment variable values and HTTP headers such as `Authorization` are never recorded.
 
 ## Quick start
 
@@ -507,7 +508,7 @@ mcpspy audit verify --file audit.jsonl   # checks an export, with no access to t
 ```
 
 > [!IMPORTANT]
-> **Save the anchors.** Whoever can write to the log can drop the triggers and rebuild the whole chain with valid hashes, and `verify` alone can't tell. It can only tell if the head it printed earlier, kept somewhere this machine can't change (CI, a ticket, another system), is still in the chain. The chain doesn't sign anything, and the user running mcpspy is able to edit their own log.
+> **Save the anchors.** Whoever can write to the log can drop the triggers and rebuild the whole chain with valid hashes, and `verify` alone can't tell. It can only tell if the head it printed earlier, kept somewhere this machine can't change (CI, a ticket, another system), is still in the chain. The chain doesn't sign anything, and the user running mcpspy is able to edit their own log. A [collector](#-collecting-from-many-machines) does this for you on every push.
 
 #### When the trail can't be written
 
@@ -537,6 +538,106 @@ flowchart LR
 - **A long lock counts as a failure.** A write waits up to 5 seconds for another process to finish. `mcpspy prune --vacuum` can hold the lock for longer, so run it when no agent is busy.
 - **It can't undo what the server already did.** If a reply can't be recorded, the agent never sees it, but the server has already run the call. The `call` event was written first, so the trail shows it, with no `outcome`.
 - **Over HTTP, `GET` and `DELETE` requests before a session exists** aren't MCP messages, so they aren't recorded.
+
+### 🏢 Collecting from many machines
+
+An audit trail on one laptop has two problems: nobody can see across the team, and the person it records can edit it. `mcpspy collect` is a small server you host yourself. Machines push their trails to it, and it keeps each one as first received.
+
+<p align="center">
+    <img src="docs/collector.png" alt="The mcpspy collector page: tiles showing 5 machines, 1 flagged, 1 silent and 4 calls denied; a machines table with ok, flagged, silent and waiting statuses; an incident saying ben-xps's own check found event 8 missing; and the latest events from every machine." width="900">
+</p>
+
+```mermaid
+flowchart LR
+    subgraph L1 ["Laptop"]
+        P1["mcpspy run"] --> D1[("mcpspy.db")]
+        D1 --> S1["audit push --follow"]
+    end
+    subgraph L2 ["CI runner"]
+        P2["mcpspy run"] --> D2[("mcpspy.db")]
+        D2 --> S2["audit push"]
+    end
+    S1 -->|"HTTPS + token"| C["mcpspy collect"]
+    S2 -->|"HTTPS + token"| C
+    C --> CD[("collector.db<br/>one chain per machine")]
+    CD --> V["Web view and JSON API"]
+    CD --> CLI["collect machines · verify"]
+```
+
+**Set it up.** On the collector:
+
+```sh
+mcpspy collect --host 0.0.0.0 --tls-cert cert.pem --tls-key key.pem   # prints the link to the view
+mcpspy collect add ada-laptop                                         # prints a token, once
+```
+
+On each machine:
+
+```sh
+export MCPSPY_COLLECT_TOKEN=mcs_…                # read from the environment, so it stays out of process lists
+mcpspy audit push https://audit.example.com --follow    # or without --follow, from cron or the end of a CI job
+```
+
+Each token belongs to one chain, so give each log its own machine name. `collect` listens only on localhost until you say otherwise, and refuses a network address without TLS unless you pass `--plain-http` because something in front of it handles TLS. `audit push` refuses plain `http://` to another host unless you pass `--insecure-http`, and it won't follow redirects, so the token can't be sent elsewhere. A private CA works through Node's `NODE_EXTRA_CA_CERTS`.
+
+**What a push does.** The collector decides what's valid, so the machine keeps no state and a failed push simply runs again. Each batch starts with the last event the collector already holds, which shows the local chain still contains it:
+
+```mermaid
+sequenceDiagram
+    participant M as Machine
+    participant C as Collector
+    M->>M: check the whole local chain
+    M->>C: my head is 40:ab12…, and what my check found
+    C->>M: I hold up to 37:9f3c…
+    M->>C: events 37, 38, 39, 40
+    Note over C: 37 matches what I hold, so 38–40 follow on
+    C->>M: 200, I hold up to 40:ab12…
+```
+
+And what the collector does with it, in one transaction:
+
+```text
+for each event sent, in order:
+    if hash(event) is wrong                 → incident "tampered", stop
+    if event.seq <= held head:
+        if it differs from the held copy    → incident "rewritten", stop
+        else skip it                          (a repeat)
+    if event.seq is not head + 1            → incident "gap", stop
+    if event.prev_hash is not the head hash → incident "tampered", stop
+    store it and move the head on
+
+if no problem so far:
+    if the machine's head is behind ours    → incident "truncated"
+    if it's level but its hash differs      → incident "rewritten"
+if the machine's own check found a break    → incident "tampered"
+
+keep the valid events, record last_seen
+answer 409 if there was any incident, otherwise 200
+```
+
+Nothing a machine sends can replace what's held, and that's what a saved anchor does for one machine, done automatically. Rebuilding a whole local chain passes `audit verify` on the machine itself, but the collector flags it on the next push.
+
+| Status | Meaning |
+| --- | --- |
+| `ok` | Reported in recently, and its chain lines up. |
+| `flagged` | At least one incident. It stays flagged: a rebuilt or reset log needs a new machine name, so the old chain and its incidents stay on record. |
+| `silent` | Not heard from within `--silent-after` (1 hour by default). This can be a laptop that's asleep, or someone who stopped the push, so check before assuming either. `--follow` pushes even with nothing new, so a quiet machine doesn't look silent. |
+| `waiting` | Registered, but it hasn't pushed yet. |
+| `revoked` | Its token no longer works. What it sent stays. |
+
+<p align="center">
+    <img src="docs/collector-denied.png" alt="The collector in dark mode, filtered to denied calls across machines: write_file denied on ben-xps because writes need a human, read_file denied for a path outside /srv/app, and a query denied on ada-mbp." width="900">
+</p>
+
+The page refreshes itself and has no scripts. Filter with `?machine=` and `?denied=1`, or get JSON from `/api/machines`, `/api/incidents` and `/api/events`. The view needs the link `collect` prints; set `MCPSPY_COLLECT_VIEW_KEY` to keep the same link across restarts. `mcpspy collect machines` prints each machine's status and anchor, `mcpspy collect revoke <name>` stops one, and `mcpspy collect verify` re-checks the chains the collector holds, exiting 1 on a problem.
+
+**What the collector can and can't tell you:**
+
+- **It's what leaves the machine.** Users and hostnames, working directories, commands or URLs, tool names, resource URIs and policy reasons, after redaction. Arguments and results stay behind, as hashes. Check that this fits your policies before pointing a team at a collector.
+- **It proves the record hasn't changed since it arrived, not that it was true.** Someone in control of a machine can rewrite events before the first push, run altered mcpspy code, or stop pushing, which shows as `silent`. Frequent pushes make the window small. Combine with `--require-audit` so sessions can't run unrecorded.
+- **The collector's own host is trusted.** `collect verify` finds edits to its file, but someone with full access to it could rebuild a chain and its head. Back it up, and restrict who can reach it.
+- **Times are what each machine reported.** The list is ordered by when events arrived, so a wrong clock can't move an event to the top.
+- **It's built for one team.** One view key rather than user accounts, one SQLite file, no rate limits, and nothing trims old events.
 
 ### 🔒 Secrets
 
@@ -575,6 +676,9 @@ Patterns can't catch everything, such as a password in free text with nothing ar
 | `mcpspy export [--session <id>]...` / `mcpspy import <file \| ->` | Copy sessions between logs as JSON Lines (see [Moving and sharing sessions](#moving-and-sharing-sessions)). |
 | `mcpspy audit [--session <id>] [--denied] [-n <50>] [--json]` | List the audit trail (see [Audit trail](#-audit-trail)). |
 | `mcpspy audit verify [--anchor <seq:hash>] [--file <export>]` / `mcpspy audit export` | Check the trail for changes, and write it out as JSON Lines. |
+| `mcpspy audit push <url> [--follow] [--interval <30>] [--insecure-http]` | Send the trail to a collector, with the token in `$MCPSPY_COLLECT_TOKEN` (see [Collecting from many machines](#-collecting-from-many-machines)). |
+| `mcpspy collect [--port 7900] [--host <addr>] [--tls-cert <file> --tls-key <file>] [--plain-http] [--silent-after <1h>]` | Receive trails from many machines, and serve the view at the link it prints. |
+| `mcpspy collect add <machine>` / `revoke <machine>` / `machines [--json]` / `verify` | Register a machine and print its token once, stop one, list them with their anchors, and re-check what's held. Its data is in `~/.mcpspy/collector.db`, or `$MCPSPY_COLLECT_DB`. |
 | `mcpspy prune [--older-than 30d] [--keep <n>] [--max-size 500MB] [--dry-run] [--vacuum]` | Delete old sessions so the log stops growing; `MCPSPY_RETENTION` makes `mcpspy ui` do it daily. |
 | `mcpspy validate [--session <id>]` | List schema and protocol issues; exits 1 if there are errors. |
 | `mcpspy mock serve <file>` / `mcpspy mock add <file> <id>...` | Run a stand-in server from mock rules; turn recorded calls into rules. |
@@ -769,7 +873,7 @@ Recorded traffic often holds secrets: tokens in tool arguments, private document
 - **Names, not values.** For stdio servers, mcpspy stores the names of environment variables (so replay can say which are missing), never their values. Over HTTP, headers are never stored at all.
 - **A key per run.** Loopback is shared by every user on the machine, so `mcpspy ui` makes a random key each time it starts and prints a link carrying it. Opening the link swaps the key for an `HttpOnly`, `SameSite=Strict` cookie and drops it from the address bar. Without the cookie, every request gets `401`, so another user can't read your log through the UI or replay calls as you.
 - **The HTTP proxy is for anyone on this machine.** `mcpspy proxy` can't tell which local user is talking to it, so on a shared machine any of them can use it, and the `-H` headers it adds. Use `-H` tokens there only if they'd be fine in those users' hands.
-- **Opt-in network calls.** Nothing is sent anywhere unless you run `mcpspy tokens --exact`, which says so in its help.
+- **Opt-in network calls.** Nothing is sent anywhere unless you run `mcpspy tokens --exact`, which says so in its help, or `mcpspy audit push`, which sends the audit trail (no arguments or results) to the collector you name.
 
 ## Your log on disk
 
@@ -872,6 +976,12 @@ src/
 ├── policy.ts           ← policy rules: which calls an agent may make
 ├── policy-suggest.ts   ← mcpspy policy suggest
 ├── transfer.ts         ← mcpspy export and import
+├── audit.ts            ← the audit trail: events, hash chain, verification
+├── collect/
+│   ├── store.ts        ← mcpspy collect: one chain per machine, and incidents
+│   ├── server.ts       ← its HTTP API, tokens and view key
+│   ├── page.ts         ← its web view, rendered on the server
+│   └── push.ts         ← mcpspy audit push
 ├── rpc-client.ts · http-client.ts     ← the minimal clients replay and suites use
 ├── replay.ts · suite.ts · diff.ts
 └── server.ts           ← the UI's API and live stream
@@ -949,7 +1059,7 @@ Numbers vary from run to run and machine to machine; a laptop's clock speed alon
 - **Policies test values, not meaning.** A pattern such as `^select ` narrows what a query tool receives, but it isn't a SQL parser. For a hard guarantee, give the server credentials that can only read.
 - **The audit trail shows tampering; it doesn't prevent it.** Without a saved anchor, someone who can write to the log can rewrite the whole chain. Agent names are what the agent reports about itself, and the user is the OS account running the proxy.
 - **A broken log means gaps in the audit trail, unless you use `--require-audit`.** By default, mcpspy warns and keeps proxying. Events from that point on are lost, and `audit verify` still says the chain is intact. See [When the trail can't be written](#when-the-trail-cant-be-written).
-- **The audit trail covers one machine.** It's CLI only, with no view in the UI and no way yet to send it to a central store or combine several machines' trails.
+- **The collector is built for one team, and `mcpspy ui` doesn't show the audit trail.** See [what the collector can and can't tell you](#-collecting-from-many-machines).
 - **Token estimates are estimates.** Use them to compare sizes, or `--exact` for real numbers.
 - **One log per machine by default.** Sessions from every project share `~/.mcpspy/mcpspy.db`; use `--db` or `MCPSPY_DB` to keep a project's traffic apart.
 
