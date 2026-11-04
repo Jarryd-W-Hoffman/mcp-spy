@@ -1,3 +1,4 @@
+import type { AuditTrail } from './audit.js';
 import { classifyFrame, requestsLaterPage } from './jsonrpc.js';
 import { Redactor } from './redact.js';
 import { contextCost } from './tokens.js';
@@ -29,6 +30,8 @@ export class Recorder {
     private readonly now: () => number = () => performance.timeOrigin + performance.now(),
     /** Applied to everything recorded, before it reaches the log. */
     private readonly redactor: Redactor = new Redactor(),
+    /** Told about each message after it's recorded, when the session is audited. */
+    private readonly audit: AuditTrail | null = null,
   ) {}
 
   /**
@@ -88,6 +91,7 @@ export class Recorder {
         issues: issues.length > 0 ? JSON.stringify(issues) : null,
         mock,
       });
+      this.audit?.message({ id, ts, direction, kind: message.kind, method, rpcId: message.rpcId, payload: message.json, latencyMs: latency, rule: mock });
 
       if (message.kind === 'request' && message.rpcId !== null) {
         this.pending.set(`${direction}:${message.rpcId}`, {

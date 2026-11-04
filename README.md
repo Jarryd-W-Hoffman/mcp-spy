@@ -39,6 +39,7 @@ MCP traffic is invisible. The agent says "the tool failed", or quietly picks the
 - **Reproduce without re-prompting.** Replay any recorded call against a fresh server, edit its arguments, run it 20 times for a latency spread, or save it in a regression suite that runs in CI.
 - **Catch protocol bugs early.** Arguments and results are checked against the schemas the server itself declared, as they pass through.
 - **Decide what an agent may do.** A policy allows or refuses each call, with tests on its arguments (paths stay inside a folder, values match a pattern), rate limits, and limits on what results the agent sees.
+- **Prove what happened.** With a policy, each decision goes on a hash-chained audit trail: who ran the session, what the agent called, which rule and exact policy decided, and how it ended. It outlives `prune`, and `mcpspy audit verify` shows if it was changed.
 - **Fake what isn't there.** Answer calls from mock rules (outages, rate limits, slow responses, bad payloads) to see how an agent copes, or stand in for a server that doesn't exist yet.
 - **Nothing leaves your machine, and secrets stay out of the log.** The log is a SQLite file in your home folder. The UI and proxy only listen on localhost. Tokens and passwords in the traffic are replaced with `[REDACTED]` before they're stored. Environment variable values and HTTP headers such as `Authorization` are never recorded.
 
@@ -457,6 +458,57 @@ An `ask` rule, as the log records it: mcpspy held `summarize_notes` and sent the
 
 Policies work the same over HTTP: `mcpspy proxy <url> --policy policy.json` answers refusals itself, and filters and limits replies whether the server answers in JSON or over SSE. A remote server's working directory and home aren't known, so an `under` test there only accepts absolute paths and `file:` URIs.
 
+### 🧾 Audit trail
+
+The session log is for debugging, so it can be pruned. The audit trail is for answering "what did this agent do, and what allowed it?" later on. Any session with `--policy` adds to it, and `--audit` turns it on without a policy (on `run`, `proxy` and `wrap`).
+
+```console
+$ mcpspy audit
+2026-11-04 10:54:37      1  #1    files        session_start ada@laptop ["mcpspy","mock","serve","mocks.json"] (with policy)
+2026-11-04 10:54:37      2  #1    files        call          read_file (claude-code 2.1)
+2026-11-04 10:54:37      3  #1    files        verdict       allow read_file (reads)
+2026-11-04 10:54:37      4  #1    files        call          write_file (claude-code 2.1)
+2026-11-04 10:54:37      5  #1    files        verdict       deny write_file (no writes): writes need a human
+2026-11-04 10:54:37      6  #1    files        outcome       write_file tool_error (policy: no writes)
+2026-11-04 10:54:37      7  #1    files        outcome       read_file ok
+2026-11-04 10:54:38      8  #1    files        session_end   exit 0
+```
+
+`--denied` shows only refusals, `--session <id>` one session, `-n <count>` how far back to go, and `--json` prints one event per line.
+
+| Event | What it records |
+| --- | --- |
+| `session_start` | OS user and host, server name, command or URL, working directory, and the policy's path and SHA-256. |
+| `call` | A tool call, resource read, prompt fetch, or sampling or elicitation request, with the agent's reported name and a hash of the message. |
+| `verdict` | Allow, deny or ask, with the rule, the reason and the SHA-256 of the policy in force. A policy that reloads mid-session shows up here. |
+| `approval` | What the user answered when a rule asked them. |
+| `outcome` | `ok`, `tool_error` or `rpc_error`, any rule that changed the result, the latency and a hash of the reply. A `call` with no `outcome` never got an answer. |
+| `session_end` | Exit code or signal. A session with no end was cut off. |
+
+Arguments and results aren't copied in, only their hashes, so the trail holds nothing that redaction or `prune` is meant to remove. Tool names, resource URIs, commands and policy reasons do appear, after redaction.
+
+**How it detects changes.** Each event's hash covers the event before it, so a change anywhere breaks everything after it:
+
+```mermaid
+flowchart LR
+    G["genesis<br/>000…"] --> E1["event 1<br/>session_start"]
+    E1 -->|"hash of 1"| E2["event 2<br/>call + message hash"]
+    E2 -->|"hash of 2"| E3["event 3<br/>verdict + policy hash"]
+    E3 -->|"hash of 3"| E4["…"]
+    E2 -.->|"compares payload hash"| M[("session log<br/>messages")]
+    E4 --> A["Anchor seq:hash<br/>saved off this machine"]
+```
+
+```sh
+mcpspy audit verify                      # checks the chain and the messages still in the log; exits 1 on a problem
+mcpspy audit verify --anchor 10:f7c8…    # also proves the chain still contains an earlier head
+mcpspy audit export > audit.jsonl        # the whole trail, with no arguments or results
+mcpspy audit verify --file audit.jsonl   # checks an export, with no access to the log
+```
+
+> [!IMPORTANT]
+> **Save the anchors.** Whoever can write to the log can drop the triggers and rebuild the whole chain with valid hashes, and `verify` alone can't tell. It can only tell if the head it printed earlier, kept somewhere this machine can't change (CI, a ticket, another system), is still in the chain. The chain doesn't sign anything, and the user running mcpspy is able to edit their own log.
+
 ### 🔒 Secrets
 
 mcpspy removes secrets from what it records, before anything reaches the log. The agent and server still exchange the real values, because only the record changes.
@@ -478,10 +530,10 @@ Patterns can't catch everything, such as a password in free text with nothing ar
 
 | Command | What it does |
 | --- | --- |
-| `mcpspy wrap [<config>] [--only <name>] [--dry-run] [--command <path>] [--policy <file>]` | Put mcpspy in front of the stdio servers in an MCP config (`.mcp.json` by default). |
+| `mcpspy wrap [<config>] [--only <name>] [--dry-run] [--command <path>] [--policy <file>] [--audit]` | Put mcpspy in front of the stdio servers in an MCP config (`.mcp.json` by default). |
 | `mcpspy unwrap [<config>] [--only <name>] [--dry-run]` | Take it out again, restoring each server's command and args. |
-| `mcpspy run [--name <label>] [--policy <file>] [--mocks <file>] [--redact <regex>] [--no-redact] -- <cmd> [args…]` | Start a stdio server behind the proxy. `--policy` decides which calls the agent may make. `mcpspy -- <cmd>` is shorthand. |
-| `mcpspy proxy <url> [--port 7800] [--name <label>] [--policy <file>] [--mocks <file>] [-H 'Name: value'] [--login]` | Proxy a server reached over HTTP (Streamable HTTP or HTTP+SSE). `-H` adds a header, such as a token, to every request. `--login` logs in with OAuth in your browser and adds the token. Takes `--redact` and `--no-redact` like `run`. |
+| `mcpspy run [--name <label>] [--policy <file>] [--audit] [--mocks <file>] [--redact <regex>] [--no-redact] -- <cmd> [args…]` | Start a stdio server behind the proxy. `--policy` decides which calls the agent may make. `mcpspy -- <cmd>` is shorthand. |
+| `mcpspy proxy <url> [--port 7800] [--name <label>] [--policy <file>] [--audit] [--mocks <file>] [-H 'Name: value'] [--login]` | Proxy a server reached over HTTP (Streamable HTTP or HTTP+SSE). `-H` adds a header, such as a token, to every request. `--login` logs in with OAuth in your browser and adds the token. Takes `--redact` and `--no-redact` like `run`. |
 | `mcpspy ui [--port 7777] [--open] [--read-only]` | Serve the web inspector on localhost, at the link it prints (it carries a new key each run). `--read-only` turns replay off. |
 | `mcpspy tail [-f] [-n 50] [--session <id>] [--json]` | Print recorded messages; `-f` follows new ones, `--json` prints NDJSON rows. |
 | `mcpspy sessions [--limit 20]` | List recorded sessions with their status and message count. |
@@ -492,6 +544,8 @@ Patterns can't catch everything, such as a password in free text with nothing ar
 | `mcpspy replay <id> [--args <json> \| --params <json>] [--repeat <n>] [-e K=V] [-H 'Name: value']` | Re-run a recorded request against a fresh server (or session) and diff the response. |
 | `mcpspy suite add <file> <id>...` / `mcpspy suite run <file> [--update] [-H …]` | Save recorded calls as a regression suite, and run it. |
 | `mcpspy export [--session <id>]...` / `mcpspy import <file \| ->` | Copy sessions between logs as JSON Lines (see [Moving and sharing sessions](#moving-and-sharing-sessions)). |
+| `mcpspy audit [--session <id>] [--denied] [-n <50>] [--json]` | List the audit trail (see [Audit trail](#-audit-trail)). |
+| `mcpspy audit verify [--anchor <seq:hash>] [--file <export>]` / `mcpspy audit export` | Check the trail for changes, and write it out as JSON Lines. |
 | `mcpspy prune [--older-than 30d] [--keep <n>] [--max-size 500MB] [--dry-run] [--vacuum]` | Delete old sessions so the log stops growing; `MCPSPY_RETENTION` makes `mcpspy ui` do it daily. |
 | `mcpspy validate [--session <id>]` | List schema and protocol issues; exits 1 if there are errors. |
 | `mcpspy mock serve <file>` / `mcpspy mock add <file> <id>...` | Run a stand-in server from mock rules; turn recorded calls into rules. |
@@ -740,6 +794,8 @@ Or set `MCPSPY_RETENTION` to an age, a size, or both (`30d`, `1GB`, `30d,1GB`). 
 - **Proxies keep recording.** Deletion runs in small batches with pauses in between, so proxies writing to the same log wait at most a moment. On a million-message log, a concurrent writer's slowest insert during a prune took 80 ms.
 - **Freed space is reused.** New recordings fill it, so the file stops growing, but it doesn't shrink on its own. Add `--vacuum` to shrink it now. That locks the log briefly and needs free disk space about the size of the log, so run it when no agent is busy.
 
+`prune` leaves the [audit trail](#-audit-trail) alone, and nothing trims the trail yet. Each event takes about 420 bytes in the log, and adding one takes about 0.1 ms on the machine the [benchmarks](#performance) ran on.
+
 Or delete the file to start over.
 
 ### Moving and sharing sessions
@@ -860,6 +916,9 @@ Numbers vary from run to run and machine to machine; a laptop's clock speed alon
 - **Mock rules apply to single requests.** Batched requests always go to the real server.
 - **Very large results are slower to pass through.** A 5 MB result takes a few hundred milliseconds longer, mostly to scan it for secrets. See [Performance](#performance).
 - **Policies test values, not meaning.** A pattern such as `^select ` narrows what a query tool receives, but it isn't a SQL parser. For a hard guarantee, give the server credentials that can only read.
+- **The audit trail shows tampering; it doesn't prevent it.** Without a saved anchor, someone who can write to the log can rewrite the whole chain. Agent names are what the agent reports about itself, and the user is the OS account running the proxy.
+- **A broken log means gaps in the audit trail.** If recording fails, mcpspy warns and keeps proxying, with policies still enforced, rather than cut the agent off. Events from that point on are lost, which shows up as a session with no `session_end`. There's no setting yet to stop the session instead.
+- **The audit trail covers one machine.** It's CLI only, with no view in the UI and no way yet to send it to a central store or combine several machines' trails.
 - **Token estimates are estimates.** Use them to compare sizes, or `--exact` for real numbers.
 - **One log per machine by default.** Sessions from every project share `~/.mcpspy/mcpspy.db`; use `--db` or `MCPSPY_DB` to keep a project's traffic apart.
 

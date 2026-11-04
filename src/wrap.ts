@@ -14,6 +14,8 @@ export interface WrapOptions {
   mocks?: string;
   /** Policy file (an absolute path: the agent may start servers anywhere). */
   policy?: string;
+  /** Keep an audit trail even without a policy. */
+  audit?: boolean;
 }
 
 export interface WrapChange {
@@ -38,6 +40,7 @@ export function wrapConfig(config: unknown, options: WrapOptions = {}): { config
       ...(options.db !== undefined ? ['--db', options.db] : []),
       ...(options.mocks !== undefined ? ['--mocks', options.mocks] : []),
       ...(options.policy !== undefined ? ['--policy', options.policy] : []),
+      ...(options.audit ? ['--audit'] : []),
       '--',
       entry.command as string,
       ...stringArgs(entry),

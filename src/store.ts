@@ -2,6 +2,7 @@ import { chmodSync, existsSync, mkdirSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { DatabaseSync, type StatementSync } from 'node:sqlite';
+import { chainHash, GENESIS, type AuditEvent } from './audit.js';
 import { requestsLaterPage } from './jsonrpc.js';
 import type { MessageRow, NewMessage, SessionRow } from './types.js';
 
@@ -55,6 +56,25 @@ CREATE TABLE IF NOT EXISTS exact_counts (
   counted_at REAL NOT NULL,
   PRIMARY KEY (message_id, model)
 );
+
+-- No foreign key: the trail outlives the sessions it describes, which prune may delete.
+CREATE TABLE IF NOT EXISTS audit_events (
+  seq INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts INTEGER NOT NULL,
+  session_id INTEGER NOT NULL,
+  type TEXT NOT NULL,
+  data TEXT NOT NULL,
+  prev_hash TEXT NOT NULL,
+  hash TEXT NOT NULL
+);
+
+-- Stops accidents. Someone determined can drop these, which is what the hash chain is for.
+CREATE TRIGGER IF NOT EXISTS audit_events_no_update BEFORE UPDATE ON audit_events BEGIN
+  SELECT RAISE(ABORT, 'audit events are append-only');
+END;
+CREATE TRIGGER IF NOT EXISTS audit_events_no_delete BEFORE DELETE ON audit_events BEGIN
+  SELECT RAISE(ABORT, 'audit events are append-only');
+END;
 `;
 
 /** Columns added after the first release, applied to older databases on open. */
@@ -475,6 +495,55 @@ export class Store {
       this.db.exec('ROLLBACK');
       throw error;
     }
+  }
+
+  /**
+   * Adds an event to the end of the audit chain. The write lock is held from
+   * reading the last hash to inserting, since several proxies share the chain.
+   * The sequence comes from SQLite's high-water mark, so a removed end of the
+   * chain is never quietly reused.
+   */
+  appendAudit(event: Pick<AuditEvent, 'ts' | 'session_id' | 'type' | 'data'>): AuditEvent {
+    return this.transaction(() => {
+      const last = this.db.prepare('SELECT hash FROM audit_events ORDER BY seq DESC LIMIT 1').get() as { hash: string } | undefined;
+      const unsigned = { ...event, seq: this.auditHighWater() + 1, prev_hash: last?.hash ?? GENESIS };
+      const row = { ...unsigned, hash: chainHash(unsigned) };
+      this.db
+        .prepare('INSERT INTO audit_events (seq, ts, session_id, type, data, prev_hash, hash) VALUES (:seq, :ts, :session_id, :type, :data, :prev_hash, :hash)')
+        .run(row);
+      return row;
+    });
+  }
+
+  /** The highest sequence ever written, which outlasts the row that had it. */
+  auditHighWater(): number {
+    const row = this.db.prepare("SELECT seq FROM sqlite_sequence WHERE name = 'audit_events'").get() as { seq: number } | undefined;
+    return row?.seq ?? 0;
+  }
+
+  /** Every event in chain order, read in pages so a long chain doesn't sit in memory. */
+  *auditEvents(batch = 1000): Generator<AuditEvent> {
+    const page = this.db.prepare('SELECT * FROM audit_events WHERE seq > ? ORDER BY seq LIMIT ?');
+    let after = 0;
+    for (;;) {
+      const rows = page.all(after, batch) as unknown as AuditEvent[];
+      yield* rows;
+      if (rows.length < batch) return;
+      after = rows[rows.length - 1]!.seq;
+    }
+  }
+
+  /** The latest events, oldest of them first. */
+  recentAudit(filter: { sessionId?: number; denied?: boolean; limit: number }): AuditEvent[] {
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM audit_events
+         WHERE (:session IS NULL OR session_id = :session)
+           AND (:denied = 0 OR (type = 'verdict' AND json_extract(data, '$.decision') = 'deny'))
+         ORDER BY seq DESC LIMIT :limit`,
+      )
+      .all({ session: filter.sessionId ?? null, denied: filter.denied ? 1 : 0, limit: filter.limit }) as unknown as AuditEvent[];
+    return rows.reverse();
   }
 
   /** The log's size on disk, and how much of it is free pages that new recordings reuse. */
