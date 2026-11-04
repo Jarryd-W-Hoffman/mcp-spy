@@ -509,6 +509,35 @@ mcpspy audit verify --file audit.jsonl   # checks an export, with no access to t
 > [!IMPORTANT]
 > **Save the anchors.** Whoever can write to the log can drop the triggers and rebuild the whole chain with valid hashes, and `verify` alone can't tell. It can only tell if the head it printed earlier, kept somewhere this machine can't change (CI, a ticket, another system), is still in the chain. The chain doesn't sign anything, and the user running mcpspy is able to edit their own log.
 
+#### When the trail can't be written
+
+By default, mcpspy puts the agent first: if the log can't be written (a full disk, say), it warns and keeps proxying, with policies still enforced. Those calls go unrecorded, and because the chain simply stops growing, `audit verify` still reports it as intact. The only sign is a session with no `session_end`.
+
+Add `--require-audit` (on `run`, `proxy` or `wrap`) when an unrecorded call is worse than a stopped agent. It implies `--audit`, and each message is recorded before it's passed on:
+
+```mermaid
+flowchart LR
+    A["Agent's call"] --> W1{"Recorded?"}
+    W1 -->|yes| S["Server"]
+    W1 -->|no| X["Stop and refuse"]
+    S --> W2{"Reply recorded?"}
+    W2 -->|yes| B["Agent gets the reply"]
+    W2 -->|no| X
+```
+
+| | Default | `--require-audit` |
+| --- | --- | --- |
+| Log can't be opened at startup | Runs without recording | `run` exits 1 and the server never starts |
+| A call can't be recorded | Forwarded unrecorded | Never reaches the server; the agent gets error `-32001` |
+| A reply can't be recorded | Delivered unrecorded | Held back; the agent gets an error |
+| After that | Keeps proxying, unrecorded | `run` stops the server and exits 1; `proxy` answers `503` until restarted |
+| Bodies or replies mcpspy can't read (PUT bodies, unknown compression) | Passed through | Refused |
+
+- **Stopping is permanent for that run.** Nothing retries, so a gap can't open and close unnoticed. Restart the proxy once the log is fixed.
+- **A long lock counts as a failure.** A write waits up to 5 seconds for another process to finish. `mcpspy prune --vacuum` can hold the lock for longer, so run it when no agent is busy.
+- **It can't undo what the server already did.** If a reply can't be recorded, the agent never sees it, but the server has already run the call. The `call` event was written first, so the trail shows it, with no `outcome`.
+- **Over HTTP, `GET` and `DELETE` requests before a session exists** aren't MCP messages, so they aren't recorded.
+
 ### 🔒 Secrets
 
 mcpspy removes secrets from what it records, before anything reaches the log. The agent and server still exchange the real values, because only the record changes.
@@ -530,10 +559,10 @@ Patterns can't catch everything, such as a password in free text with nothing ar
 
 | Command | What it does |
 | --- | --- |
-| `mcpspy wrap [<config>] [--only <name>] [--dry-run] [--command <path>] [--policy <file>] [--audit]` | Put mcpspy in front of the stdio servers in an MCP config (`.mcp.json` by default). |
+| `mcpspy wrap [<config>] [--only <name>] [--dry-run] [--command <path>] [--policy <file>] [--audit] [--require-audit]` | Put mcpspy in front of the stdio servers in an MCP config (`.mcp.json` by default). |
 | `mcpspy unwrap [<config>] [--only <name>] [--dry-run]` | Take it out again, restoring each server's command and args. |
-| `mcpspy run [--name <label>] [--policy <file>] [--audit] [--mocks <file>] [--redact <regex>] [--no-redact] -- <cmd> [args…]` | Start a stdio server behind the proxy. `--policy` decides which calls the agent may make. `mcpspy -- <cmd>` is shorthand. |
-| `mcpspy proxy <url> [--port 7800] [--name <label>] [--policy <file>] [--audit] [--mocks <file>] [-H 'Name: value'] [--login]` | Proxy a server reached over HTTP (Streamable HTTP or HTTP+SSE). `-H` adds a header, such as a token, to every request. `--login` logs in with OAuth in your browser and adds the token. Takes `--redact` and `--no-redact` like `run`. |
+| `mcpspy run [--name <label>] [--policy <file>] [--audit] [--require-audit] [--mocks <file>] [--redact <regex>] [--no-redact] -- <cmd> [args…]` | Start a stdio server behind the proxy. `--policy` decides which calls the agent may make. `mcpspy -- <cmd>` is shorthand. |
+| `mcpspy proxy <url> [--port 7800] [--name <label>] [--policy <file>] [--audit] [--require-audit] [--mocks <file>] [-H 'Name: value'] [--login]` | Proxy a server reached over HTTP (Streamable HTTP or HTTP+SSE). `-H` adds a header, such as a token, to every request. `--login` logs in with OAuth in your browser and adds the token. Takes `--redact` and `--no-redact` like `run`. |
 | `mcpspy ui [--port 7777] [--open] [--read-only]` | Serve the web inspector on localhost, at the link it prints (it carries a new key each run). `--read-only` turns replay off. |
 | `mcpspy tail [-f] [-n 50] [--session <id>] [--json]` | Print recorded messages; `-f` follows new ones, `--json` prints NDJSON rows. |
 | `mcpspy sessions [--limit 20]` | List recorded sessions with their status and message count. |
@@ -582,6 +611,8 @@ flowchart LR
 Your agent starts one `mcpspy run` per stdio server, so a busy setup has several proxies writing at once, plus a UI and a `tail` reading. SQLite in WAL mode lets readers and writers work side by side, and a busy timeout covers the moments two writers collide. No proxy has to know whether a UI is running.
 
 ### The stdio proxy: forward first, record second
+
+(With `--require-audit` the order flips: see [When the trail can't be written](#when-the-trail-cant-be-written).)
 
 The proxy's first job is to stay out of the way. Bytes are forwarded the moment they arrive, unchanged; a copy goes to a line splitter that records complete messages on the side:
 
@@ -917,7 +948,7 @@ Numbers vary from run to run and machine to machine; a laptop's clock speed alon
 - **Very large results are slower to pass through.** A 5 MB result takes a few hundred milliseconds longer, mostly to scan it for secrets. See [Performance](#performance).
 - **Policies test values, not meaning.** A pattern such as `^select ` narrows what a query tool receives, but it isn't a SQL parser. For a hard guarantee, give the server credentials that can only read.
 - **The audit trail shows tampering; it doesn't prevent it.** Without a saved anchor, someone who can write to the log can rewrite the whole chain. Agent names are what the agent reports about itself, and the user is the OS account running the proxy.
-- **A broken log means gaps in the audit trail.** If recording fails, mcpspy warns and keeps proxying, with policies still enforced, rather than cut the agent off. Events from that point on are lost, which shows up as a session with no `session_end`. There's no setting yet to stop the session instead.
+- **A broken log means gaps in the audit trail, unless you use `--require-audit`.** By default, mcpspy warns and keeps proxying. Events from that point on are lost, and `audit verify` still says the chain is intact. See [When the trail can't be written](#when-the-trail-cant-be-written).
 - **The audit trail covers one machine.** It's CLI only, with no view in the UI and no way yet to send it to a central store or combine several machines' trails.
 - **Token estimates are estimates.** Use them to compare sizes, or `--exact` for real numbers.
 - **One log per machine by default.** Sessions from every project share `~/.mcpspy/mcpspy.db`; use `--db` or `MCPSPY_DB` to keep a project's traffic apart.
