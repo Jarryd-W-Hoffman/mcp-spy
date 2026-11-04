@@ -18,6 +18,8 @@ export interface PageData {
   filter: { machine?: string; denied?: boolean };
   now: number;
   silentAfterMs: number;
+  /** Delivery of alerts, when a webhook is set up. */
+  alerts?: { waiting: number; lastError: string | null };
 }
 
 const ESCAPES: Record<string, string> = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
@@ -150,6 +152,7 @@ th.num, .num { text-align: right; font-variant-numeric: tabular-nums; }
 .hash { font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--dim); }
 .badge { display: inline-block; padding: 0 7px; border-radius: 999px; font-size: 12px; font-weight: 600; background: var(--muted-bg); color: var(--dim); }
 .badge.good { background: var(--good-bg); color: var(--good); } .badge.warn { background: var(--warn-bg); color: var(--warn); } .badge.bad { background: var(--bad-bg); color: var(--bad); }
+.problem { margin: 14px 0 0; padding: 10px 14px; border-radius: 8px; background: var(--warn-bg); color: var(--warn); }
 .empty { background: var(--panel); border: 1px dashed var(--line); border-radius: 8px; padding: 16px; color: var(--dim); margin: 0; }
 </style>
 </head>
@@ -161,7 +164,9 @@ th.num, .num { text-align: right; font-variant-numeric: tabular-nums; }
   ${stat(count('flagged'), 'flagged', count('flagged') > 0 ? 'bad' : '')}
   ${stat(count('silent'), 'silent', count('silent') > 0 ? 'warn' : '')}
   ${stat(data.machines.reduce((sum, entry) => sum + entry.denied, 0), 'calls denied')}
+  ${data.alerts ? stat(data.alerts.waiting, 'alerts waiting', data.alerts.waiting > 0 ? 'warn' : '') : ''}
 </div>
+${data.alerts?.lastError ? `<p class="problem"><b>Alerts aren't getting through:</b> ${escapeHtml(data.alerts.lastError)}. They'll keep retrying, and nothing is lost in the meantime. Check the webhook with <code>mcpspy collect test-alert</code>.</p>` : ''}
 <h2>Machines</h2>
 ${table(['Machine', 'Status', '#Events', '#Denied', '#Open sessions', 'Last seen', 'Anchor'], data.machines.map((entry) => machineRow(entry, data)), 'No machines yet. Add one with: mcpspy collect add <name>')}
 <h2>Incidents</h2>

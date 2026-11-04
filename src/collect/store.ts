@@ -44,6 +44,26 @@ CREATE TABLE IF NOT EXISTS incidents (
   UNIQUE (machine_id, kind, seq, detail)
 );
 
+-- What's waiting to go to the webhook. A queue, so alerts outlast an outage or a restart.
+CREATE TABLE IF NOT EXISTS alerts (
+  id INTEGER PRIMARY KEY,
+  machine_id INTEGER NOT NULL REFERENCES machines(id),
+  kind TEXT NOT NULL,
+  body TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  next_try INTEGER NOT NULL,
+  attempts INTEGER NOT NULL DEFAULT 0,
+  last_error TEXT,
+  sent_at INTEGER
+);
+CREATE INDEX IF NOT EXISTS alerts_due ON alerts(next_try) WHERE sent_at IS NULL;
+
+-- Machines already reported as silent, so each silence is reported once.
+CREATE TABLE IF NOT EXISTS machine_silence (
+  machine_id INTEGER PRIMARY KEY REFERENCES machines(id),
+  since INTEGER NOT NULL
+);
+
 -- Stops accidents. The collector's own host is trusted: see the README.
 CREATE TRIGGER IF NOT EXISTS events_no_update BEFORE UPDATE ON events BEGIN
   SELECT RAISE(ABORT, 'collected events are append-only');
@@ -92,6 +112,29 @@ export interface IngestResult {
   problems: { kind: IncidentKind; seq: number; detail: string }[];
 }
 
+export type AlertKind = 'incident' | 'silent' | 'recovered';
+
+export interface AlertBody {
+  kind: AlertKind;
+  machine: string;
+  at: number;
+  incident?: { kind: IncidentKind; seq: number; detail: string };
+  /** Set on the last incident alert a machine may raise for now. */
+  limit_reached?: boolean;
+  /** When a silent machine was last heard from. */
+  last_seen?: number;
+}
+
+export interface QueuedAlert {
+  id: number;
+  attempts: number;
+  body: string;
+}
+
+/** A machine can cause any number of different incidents, so only this many an hour become alerts. They all stay on the page. */
+export const INCIDENT_ALERTS_PER_HOUR = 5;
+const HOUR = 60 * 60 * 1000;
+
 export function defaultCollectorDbPath(): string {
   return process.env.MCPSPY_COLLECT_DB ?? join(homedir(), '.mcpspy', 'collector.db');
 }
@@ -105,6 +148,8 @@ const hashToken = (token: string): string => createHash('sha256').update(token).
  */
 export class CollectorStore {
   private readonly db: DatabaseSync;
+  /** Off until a webhook is set up, so turning one on later doesn't send a backlog of old news. */
+  private alerting = false;
 
   constructor(path: string = defaultCollectorDbPath()) {
     if (path !== ':memory:') mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
@@ -116,6 +161,10 @@ export class CollectorStore {
 
   close(): void {
     this.db.close();
+  }
+
+  enableAlerts(): void {
+    this.alerting = true;
   }
 
   /** Registers a machine and returns its token. Only a hash is kept, so this is the one chance to see it. */
@@ -194,7 +243,7 @@ export class CollectorStore {
   }
 
   private ingestLocked(id: number, events: AuditEvent[], localHead: Anchor | null, localProblem: string | null, now: number): IngestResult {
-    const row = this.db.prepare('SELECT head_seq, head_hash FROM machines WHERE id = ?').get(id) as { head_seq: number; head_hash: string | null };
+    const row = this.db.prepare('SELECT name, head_seq, head_hash FROM machines WHERE id = ?').get(id) as { name: string; head_seq: number; head_hash: string | null };
     let head = { seq: row.head_seq, hash: row.head_hash };
     const problems: IngestResult['problems'] = [];
     const insert = this.db.prepare('INSERT INTO events (machine_id, seq, ts, session_id, type, data, prev_hash, hash, received_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)');
@@ -241,11 +290,72 @@ export class CollectorStore {
 
     const record = this.db.prepare(
       `INSERT INTO incidents (machine_id, kind, seq, detail, first_seen, last_seen) VALUES (:id, :kind, :seq, :detail, :now, :now)
-       ON CONFLICT (machine_id, kind, seq, detail) DO UPDATE SET last_seen = :now, count = count + 1`,
+       ON CONFLICT (machine_id, kind, seq, detail) DO UPDATE SET last_seen = :now, count = count + 1
+       RETURNING count`,
     );
-    for (const problem of problems) record.run({ id, now, ...problem });
+    for (const problem of problems) {
+      const { count } = record.get({ id, now, ...problem }) as { count: number };
+      if (count === 1) this.queueIncident(id, row.name, problem, now);
+    }
+    if (this.db.prepare('DELETE FROM machine_silence WHERE machine_id = ?').run(id).changes > 0) {
+      this.queueAlert(id, { kind: 'recovered', machine: row.name, at: now }, now);
+    }
     this.db.prepare('UPDATE machines SET head_seq = ?, head_hash = ?, last_seen = ? WHERE id = ?').run(head.seq, head.hash, now, id);
     return { accepted, head: head.seq === 0 ? null : { seq: head.seq, hash: head.hash! }, problems };
+  }
+
+  private queueAlert(machineId: number, body: AlertBody, now: number): void {
+    if (!this.alerting) return;
+    this.db.prepare('INSERT INTO alerts (machine_id, kind, body, created_at, next_try) VALUES (?, ?, ?, ?, ?)').run(machineId, body.kind, JSON.stringify(body), now, now);
+  }
+
+  private queueIncident(machineId: number, machine: string, incident: AlertBody['incident'] & object, now: number): void {
+    const { recent } = this.db.prepare("SELECT COUNT(*) AS recent FROM alerts WHERE machine_id = ? AND kind = 'incident' AND created_at > ?").get(machineId, now - HOUR) as { recent: number };
+    if (recent >= INCIDENT_ALERTS_PER_HOUR) return;
+    this.queueAlert(machineId, { kind: 'incident', machine, at: now, incident, ...(recent === INCIDENT_ALERTS_PER_HOUR - 1 ? { limit_reached: true } : {}) }, now);
+  }
+
+  /** Queues an alert for each machine that has newly gone quiet. Machines that never pushed, or were revoked, aren't expected to. */
+  noteSilentMachines(silentAfterMs: number, now = Date.now()): void {
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      const quiet = this.db
+        .prepare(
+          `SELECT id, name, last_seen FROM machines
+           WHERE revoked_at IS NULL AND last_seen IS NOT NULL AND last_seen < ?
+             AND id NOT IN (SELECT machine_id FROM machine_silence)`,
+        )
+        .all(now - silentAfterMs) as { id: number; name: string; last_seen: number }[];
+      for (const machine of quiet) {
+        this.db.prepare('INSERT INTO machine_silence (machine_id, since) VALUES (?, ?)').run(machine.id, now);
+        this.queueAlert(machine.id, { kind: 'silent', machine: machine.name, at: now, last_seen: machine.last_seen }, now);
+      }
+      this.db.exec('COMMIT');
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    }
+  }
+
+  dueAlerts(now = Date.now(), limit = 20): QueuedAlert[] {
+    return this.db.prepare('SELECT id, attempts, body FROM alerts WHERE sent_at IS NULL AND next_try <= ? ORDER BY id LIMIT ?').all(now, limit) as unknown as QueuedAlert[];
+  }
+
+  alertSent(id: number, now = Date.now()): void {
+    this.db.prepare('UPDATE alerts SET sent_at = ?, last_error = NULL WHERE id = ?').run(now, id);
+    // Sent alerts only matter for the hourly limit.
+    this.db.prepare('DELETE FROM alerts WHERE sent_at IS NOT NULL AND sent_at < ?').run(now - 24 * HOUR);
+  }
+
+  alertFailed(id: number, nextTry: number, error: string): void {
+    this.db.prepare('UPDATE alerts SET attempts = attempts + 1, next_try = ?, last_error = ? WHERE id = ?').run(nextTry, error, id);
+  }
+
+  /** How many alerts are waiting, and why the oldest failing one hasn't gone. */
+  alertStatus(): { waiting: number; lastError: string | null } {
+    const { waiting } = this.db.prepare('SELECT COUNT(*) AS waiting FROM alerts WHERE sent_at IS NULL').get() as { waiting: number };
+    const failing = this.db.prepare('SELECT last_error FROM alerts WHERE sent_at IS NULL AND last_error IS NOT NULL ORDER BY id LIMIT 1').get() as { last_error: string } | undefined;
+    return { waiting, lastError: failing?.last_error ?? null };
   }
 
   /** Re-checks each machine's held chain, which finds changes made directly to the collector's own file. */
