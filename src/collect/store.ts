@@ -337,8 +337,19 @@ export class CollectorStore {
     }
   }
 
+  /**
+   * What to send now, oldest first. The oldest waiting alert holds up the rest
+   * until its retry: the webhook is probably down, and nothing should overtake it.
+   * Kept here, not in memory, so a restart doesn't change the order.
+   */
   dueAlerts(now = Date.now(), limit = 20): QueuedAlert[] {
-    return this.db.prepare('SELECT id, attempts, body FROM alerts WHERE sent_at IS NULL AND next_try <= ? ORDER BY id LIMIT ?').all(now, limit) as unknown as QueuedAlert[];
+    return this.db
+      .prepare(
+        `SELECT id, attempts, body FROM alerts
+         WHERE sent_at IS NULL AND (SELECT next_try FROM alerts WHERE sent_at IS NULL ORDER BY id LIMIT 1) <= ?
+         ORDER BY id LIMIT ?`,
+      )
+      .all(now, limit) as unknown as QueuedAlert[];
   }
 
   alertSent(id: number, now = Date.now()): void {

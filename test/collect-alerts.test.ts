@@ -230,16 +230,25 @@ describe('sending', () => {
     expect(JSON.stringify([logs, store.alertStatus()])).not.toMatch(/SECRET|secret detail/);
     // The whole queue waits, so the second can't overtake the first, however many rounds go by.
     await new Promise((resolve) => setTimeout(resolve, 30));
-    expect(store.dueAlerts(Date.now())[0]!.attempts).toBe(0);
+    expect(store.dueAlerts()).toEqual([]);
     expect(logs).toHaveLength(1);
 
-    // A restart picks up what's due: the second now, and the first once its wait is over.
+    // Nor can it after a restart, even with the webhook back.
     hook.state.status = 200;
     await alerts!.close();
     start();
-    await vi.waitFor(() => expect(hook.received).toHaveLength(1));
-    expect(hook.received[0]!.text).toContain('also during it');
-    expect(store.alertStatus().waiting).toBe(1);
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(hook.received).toEqual([]);
+    expect(store.alertStatus().waiting).toBe(2);
+
+    // Once the wait is over, they go in order.
+    const [first, second] = store.dueAlerts(Date.now() + 3_600_000);
+    expect(first!.attempts).toBe(1);
+    expect(second!.attempts).toBe(0);
+    store.alertFailed(first!.id, 0, 'wait is over');
+    await vi.waitFor(() => expect(hook.received).toHaveLength(2));
+    expect(hook.received[0]!.text).toContain('during the outage');
+    expect(hook.received[1]!.text).toContain('also during it');
   });
 
   it('says when delivery recovers', async () => {

@@ -88,15 +88,13 @@ export function retryDelay(attempts: number, first = FIRST_RETRY_MS): number {
 /**
  * Sends queued alerts until closed. An alert leaves the queue only once the
  * webhook has accepted it, so a crash between the two can send it twice but
- * can't lose it. A failure holds the whole queue until the retry: the webhook is
- * probably down, and later alerts must not overtake the one that's waiting.
+ * can't lose it. A failure holds the whole queue until the retry, in dueAlerts.
  */
 export function startAlerts(options: AlertOptions): Alerts {
   const { store, url, silentAfterMs, log, pollMs = 5000, firstRetryMs } = options;
   const stopping = new AbortController();
   let timer: NodeJS.Timeout | undefined;
   let last = '';
-  let heldUntil = 0;
   const say = (message: string) => {
     if (message !== last) log(message);
     last = message;
@@ -109,8 +107,7 @@ export function startAlerts(options: AlertOptions): Alerts {
     } catch (error) {
       if (stopping.signal.aborted) return false;
       const reason = (error as Error).message;
-      heldUntil = Date.now() + retryDelay(alert.attempts, firstRetryMs);
-      store.alertFailed(alert.id, heldUntil, reason);
+      store.alertFailed(alert.id, Date.now() + retryDelay(alert.attempts, firstRetryMs), reason);
       say(`alerts aren't getting through, will retry: ${reason}`);
       return false;
     }
@@ -121,7 +118,6 @@ export function startAlerts(options: AlertOptions): Alerts {
   const round = async (): Promise<void> => {
     try {
       if (silentAfterMs !== null) store.noteSilentMachines(silentAfterMs);
-      if (Date.now() < heldUntil) return;
       let delivered = false;
       for (const alert of store.dueAlerts()) {
         if (!(await deliver(alert))) return;
