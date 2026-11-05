@@ -1,14 +1,14 @@
 import { spawn } from 'node:child_process';
 import { constants } from 'node:os';
 import type { Readable, Writable } from 'node:stream';
-import { AuditTrail } from '../audit.js';
+import { AUDIT_STOPPED, AuditTrail } from '../audit.js';
 import { LineSplitter } from '../framing.js';
 import { Recorder } from '../recorder.js';
 import { Redactor } from '../redact.js';
 import type { MockEngine } from '../mocks.js';
 import type { PolicyEngine } from '../policy.js';
 import { Store } from '../store.js';
-import { Interceptor } from './interceptor.js';
+import { Interceptor, POLICY_ERROR } from './interceptor.js';
 
 export interface StdioProxyOptions {
   command: string;
@@ -29,6 +29,8 @@ export interface StdioProxyOptions {
   policy?: PolicyEngine;
   /** Keep an audit trail of this session, as a policy always does. */
   audit?: boolean;
+  /** Stop the session rather than let unrecorded traffic through. Implies audit. */
+  requireAudit?: boolean;
   /** How long a policy's ask waits for the agent's user; two minutes by default. */
   askTimeoutMs?: number;
   /** What to remove from the record; built-in secret patterns by default. */
@@ -44,6 +46,8 @@ export interface StdioProxyResult {
  * Sits between an MCP client and a stdio MCP server. Bytes are forwarded
  * untouched as soon as they arrive; a copy of each chunk is framed and
  * recorded on the side, so a recording failure never breaks the session.
+ * With requireAudit it's the reverse: each line is recorded before it's
+ * forwarded, and a recording failure ends the session.
  */
 export function runStdioProxy(options: StdioProxyOptions): Promise<StdioProxyResult> {
   const {
@@ -55,6 +59,7 @@ export function runStdioProxy(options: StdioProxyOptions): Promise<StdioProxyRes
     forwardSignals = ['SIGINT', 'SIGTERM', 'SIGHUP'],
   } = options;
   const cwd = options.cwd ?? process.cwd();
+  const required = options.requireAudit === true;
 
   const redactor = options.redactor ?? new Redactor();
   const session = {
@@ -74,24 +79,36 @@ export function runStdioProxy(options: StdioProxyOptions): Promise<StdioProxyRes
   try {
     sessionId = store.createSession(session);
   } catch (error) {
+    if (required) {
+      errorOutput.write(`[mcpspy] not starting ${command}: ${AUDIT_STOPPED} (${(error as Error).message})\n`);
+      return Promise.resolve({ sessionId: -1, exitCode: 1 });
+    }
     errorOutput.write(`[mcpspy] not recording this session: ${(error as Error).message}\n`);
     store = new Store(':memory:');
     sessionId = store.createSession(session);
   }
-  const audit = options.audit || options.policy ? new AuditTrail(store, sessionId, session.name) : null;
+  const audit = options.audit || options.policy || required ? new AuditTrail(store, sessionId, session.name) : null;
   const recorder = new Recorder(store, sessionId, undefined, redactor, audit);
 
   let recordingBroken = false;
+  /** Ends the server once it's running; until then, not starting it is enough. */
+  let stopServer = (): void => {};
   const record = (fn: () => void): void => {
     if (recordingBroken) return;
     try {
       fn();
     } catch (error) {
       recordingBroken = true;
-      errorOutput.write(`[mcpspy] recording stopped, still proxying: ${(error as Error).message}\n`);
+      errorOutput.write(
+        required ? `[mcpspy] stopping the session: ${AUDIT_STOPPED} (${(error as Error).message})\n` : `[mcpspy] recording stopped, still proxying: ${(error as Error).message}\n`,
+      );
+      if (required) stopServer();
     }
   };
+  /** Whether traffic must stop: everything from here on would go unrecorded. */
+  const stopped = (): boolean => required && recordingBroken;
   record(() => audit?.started({ transport: session.transport, command: session.command, cwd, policy: options.policy?.identity() ?? null }));
+  if (stopped()) return Promise.resolve({ sessionId, exitCode: 1 });
 
   return new Promise((resolve) => {
     const child = spawn(command, args, {
@@ -100,12 +117,19 @@ export function runStdioProxy(options: StdioProxyOptions): Promise<StdioProxyRes
       stdio: ['pipe', 'pipe', 'pipe'],
     });
 
+    stopServer = () => child.kill('SIGTERM');
+    const toClient = (line: string) => output.write(`${line}\n`);
+    /** Tells the agent why it won't get what it's waiting for, when the message is waiting on an answer. */
+    const refuse = (line: string, answers: (message: { id?: unknown; method?: unknown }) => boolean) => {
+      const message = parseMessage(line);
+      if (message?.id !== undefined && answers(message)) toClient(JSON.stringify({ jsonrpc: '2.0', id: message.id, error: { code: POLICY_ERROR, message: `mcpspy stopped this session: ${AUDIT_STOPPED}` } }));
+    };
     const toServer = (line: string) => {
+      if (stopped()) return refuse(line, (message) => message.method !== undefined);
       if (child.stdin.writable) child.stdin.write(`${line}\n`);
     };
-    const toClient = (line: string) => output.write(`${line}\n`);
     const interceptor =
-      options.mocks || options.policy
+      options.mocks || options.policy || required
         ? new Interceptor({
             mocks: options.mocks ?? null,
             policy: options.policy ?? null,
@@ -130,8 +154,11 @@ export function runStdioProxy(options: StdioProxyOptions): Promise<StdioProxyRes
       const { line: forwarded, rule, answers } = interceptor.fromServer(line);
       // What the server sent is recorded even when the policy kept it from the agent,
       // and before the proxy's answers to it, so they pair with what they answer.
-      if (forwarded !== null) toClient(forwarded);
       record(() => recorder.frame('server', forwarded ?? line, rule));
+      if (forwarded !== null) {
+        if (stopped()) refuse(forwarded, (message) => message.method === undefined);
+        else toClient(forwarded);
+      }
       for (const answer of answers) {
         toServer(answer);
         record(() => recorder.frame('client', answer, rule));
@@ -153,7 +180,7 @@ export function runStdioProxy(options: StdioProxyOptions): Promise<StdioProxyRes
       const end = { exit_code: signal ? null : exitCode, exit_signal: signal };
       record(() => store.endSession(sessionId, { ended_at: Date.now(), ...end }));
       record(() => audit?.ended(end));
-      resolve({ sessionId, exitCode });
+      resolve({ sessionId, exitCode: stopped() ? 1 : exitCode });
     };
 
     const onInput = (chunk: Buffer): void => {
@@ -201,4 +228,13 @@ export function runStdioProxy(options: StdioProxyOptions): Promise<StdioProxyRes
       finish(code ?? 128 + constants.signals[signal!], signal);
     });
   });
+}
+
+/** A line as a single JSON-RPC message, or null when it's something else. */
+function parseMessage(line: string): { id?: unknown; method?: unknown } | null {
+  try {
+    return JSON.parse(line) as { id?: unknown; method?: unknown } | null;
+  } catch {
+    return null;
+  }
 }

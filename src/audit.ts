@@ -33,6 +33,9 @@ export function currentActor(read: () => { username: string } = userInfo): { use
   return { user, host: hostname() };
 }
 
+/** Told to the agent, and to whoever reads the proxy's output, when --require-audit stops traffic. */
+export const AUDIT_STOPPED = "the audit trail can't be written, and --require-audit forbids running without it";
+
 export interface AuditWriter {
   appendAudit(event: Pick<AuditEvent, 'ts' | 'session_id' | 'type' | 'data'>): AuditEvent;
 }
