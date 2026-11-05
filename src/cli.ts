@@ -42,9 +42,9 @@ import { unwrapConfig, wrapConfig, type WrapChange } from './wrap.js';
 const HELP = `mcpspy - see what your AI agent and its MCP servers say to each other
 
 Usage:
-  mcpspy run [--name <label>] [--policy <file>] [--audit] [--mocks <file>] [--redact <regex>]... [--no-redact] [--db <path>] -- <command> [args...]
+  mcpspy run [--name <label>] [--policy <file>] [--audit] [--require-audit] [--mocks <file>] [--redact <regex>]... [--no-redact] [--db <path>] -- <command> [args...]
   mcpspy -- <command> [args...]            shorthand for run
-  mcpspy proxy <url> [--port <7800>] [--name <label>] [--policy <file>] [--audit] [--mocks <file>] [-H 'Name: value']... [--login]
+  mcpspy proxy <url> [--port <7800>] [--name <label>] [--policy <file>] [--audit] [--require-audit] [--mocks <file>] [-H 'Name: value']... [--login]
                                            [--redact <regex>]... [--no-redact]
                                            proxy an MCP server over HTTP (Streamable HTTP or SSE)
   mcpspy tail [-f] [-n <count>] [--session <id>] [--json] [--db <path>]
@@ -61,7 +61,7 @@ Usage:
   mcpspy mock serve <file> [--name <label>]  a fake MCP server driven by mock rules
   mcpspy mock add <file> <message-id>...     turn recorded calls into mock rules
   mcpspy policy suggest [--session <id>]    draft a policy allowing what a session did
-  mcpspy wrap [<config>] [--only <name>]... [--dry-run] [--command <path>] [--db <path>] [--mocks <file>] [--policy <file>] [--audit]
+  mcpspy wrap [<config>] [--only <name>]... [--dry-run] [--command <path>] [--db <path>] [--mocks <file>] [--policy <file>] [--audit] [--require-audit]
   mcpspy unwrap [<config>] [--only <name>]... [--dry-run]
   mcpspy export [--session <id>]... [--db <path>] > log.jsonl   all sessions by default
   mcpspy import <file | -> [--db <path>]
@@ -97,6 +97,8 @@ MCPSPY_RETENTION (e.g. 30d, 1GB or 30d,1GB) and mcpspy ui prunes daily.
 
 With --policy or --audit, a session also adds to a hash-chained audit trail that
 prune leaves alone. See it with mcpspy audit, and check it with mcpspy audit verify.
+--require-audit stops the session if that trail can't be written, rather than
+carrying on without it.
 Nothing leaves your machine, except with tokens --exact, which sends the recorded
 tool definitions and results to Anthropic's count_tokens API.`;
 
@@ -178,7 +180,7 @@ async function run(argv: string[]): Promise<void> {
 
   const { values } = parseArgs({
     args: argv.slice(0, separator),
-    options: { name: { type: 'string' }, mocks: { type: 'string' }, policy: { type: 'string' }, audit: { type: 'boolean' }, db: { type: 'string' }, ...REDACT_OPTIONS },
+    options: { name: { type: 'string' }, mocks: { type: 'string' }, policy: { type: 'string' }, audit: { type: 'boolean' }, 'require-audit': { type: 'boolean' }, db: { type: 'string' }, ...REDACT_OPTIONS },
   });
   const [command, ...args] = argv.slice(separator + 1) as [string, ...string[]];
 
@@ -191,11 +193,12 @@ async function run(argv: string[]): Promise<void> {
   try {
     store = new Store(values.db);
   } catch (error) {
+    if (values['require-audit']) fail(`can't open the log at ${values.db ?? defaultDbPath()} (${(error as Error).message}), and --require-audit forbids running without it`);
     // The agent started us to reach its server, and nobody sees a failure here but the agent.
     process.stderr.write(`[mcpspy] can't open the log at ${values.db ?? defaultDbPath()} (${(error as Error).message}); proxying without recording\n`);
     store = new Store(':memory:');
   }
-  const { exitCode } = await runStdioProxy({ command, args, store, name: values.name ?? null, mocks, policy, audit: values.audit, redactor });
+  const { exitCode } = await runStdioProxy({ command, args, store, name: values.name ?? null, mocks, policy, audit: values.audit, requireAudit: values['require-audit'], redactor });
   store.close();
 
   // stdin may still be open (the agent closed nothing); don't let it hold us up.
@@ -214,6 +217,7 @@ async function proxyCommand(argv: string[]): Promise<void> {
       mocks: { type: 'string' },
       policy: { type: 'string' },
       audit: { type: 'boolean' },
+      'require-audit': { type: 'boolean' },
       header: { type: 'string', multiple: true, short: 'H' },
       login: { type: 'boolean' },
       db: { type: 'string' },
@@ -246,7 +250,7 @@ async function proxyCommand(argv: string[]): Promise<void> {
   const store = new Store(values.db);
   let proxy: HttpProxy;
   try {
-    proxy = await startHttpProxy({ upstream: positionals[0]!, store, name: values.name ?? null, host: values.host, port, mocks, policy, audit: values.audit, headers, login, redactor });
+    proxy = await startHttpProxy({ upstream: positionals[0]!, store, name: values.name ?? null, host: values.host, port, mocks, policy, audit: values.audit, requireAudit: values['require-audit'], headers, login, redactor });
   } catch (error) {
     await login?.close();
     const code = (error as NodeJS.ErrnoException).code;
@@ -1218,9 +1222,9 @@ function wrapCommand(argv: string[], mode: 'wrap' | 'unwrap'): void {
     options: {
       only: { type: 'string', multiple: true },
       'dry-run': { type: 'boolean' },
-      ...(mode === 'wrap' ? { command: { type: 'string' }, db: { type: 'string' }, mocks: { type: 'string' }, policy: { type: 'string' }, audit: { type: 'boolean' } } : {}),
+      ...(mode === 'wrap' ? { command: { type: 'string' }, db: { type: 'string' }, mocks: { type: 'string' }, policy: { type: 'string' }, audit: { type: 'boolean' }, 'require-audit': { type: 'boolean' } } : {}),
     },
-  }) as { values: { only?: string[]; 'dry-run'?: boolean; command?: string; db?: string; mocks?: string; policy?: string; audit?: boolean }; positionals: string[] };
+  }) as { values: { only?: string[]; 'dry-run'?: boolean; command?: string; db?: string; mocks?: string; policy?: string; audit?: boolean; 'require-audit'?: boolean }; positionals: string[] };
   if (positionals.length > 1) fail(`${mode} takes one config file`);
   const path = positionals[0] ?? '.mcp.json';
   if (!existsSync(path)) fail(`no ${path} here; pass the path to your agent's MCP config`);
@@ -1241,7 +1245,7 @@ function wrapCommand(argv: string[], mode: 'wrap' | 'unwrap'): void {
   try {
     changed =
       mode === 'wrap'
-        ? wrapConfig(config, { only: values.only, command: values.command, db: values.db, mocks: values.mocks, policy, audit: values.audit })
+        ? wrapConfig(config, { only: values.only, command: values.command, db: values.db, mocks: values.mocks, policy, audit: values.audit, requireAudit: values['require-audit'] })
         : unwrapConfig(config, { only: values.only });
   } catch (error) {
     fail(`${path}: ${(error as Error).message}`);
