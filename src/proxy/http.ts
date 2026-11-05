@@ -2,7 +2,7 @@ import { createServer, request as httpRequest, type IncomingHttpHeaders, type In
 import { request as httpsRequest } from 'node:https';
 import type { AddressInfo } from 'node:net';
 import { createBrotliDecompress, createGunzip, createInflate } from 'node:zlib';
-import { AuditTrail } from '../audit.js';
+import { AUDIT_STOPPED, AuditTrail } from '../audit.js';
 import type { MockEngine } from '../mocks.js';
 import type { PolicyEngine } from '../policy.js';
 import { Recorder } from '../recorder.js';
@@ -26,6 +26,8 @@ export interface HttpProxyOptions {
   policy?: PolicyEngine;
   /** Keep an audit trail of these sessions, as a policy always does. */
   audit?: boolean;
+  /** Stop passing traffic rather than let any of it go unrecorded. Implies audit. */
+  requireAudit?: boolean;
   /**
    * Headers to send upstream with every request, replacing the agent's (e.g. an
    * Authorization token, so the agent needn't log in). Never recorded.
@@ -107,6 +109,9 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
   /** Ids (per session) of tools/list and tools/call requests whose replies mocks or the policy may change. */
   const awaiting = new WeakMap<Tracked, Map<string, 'list' | 'call'>>();
 
+  const required = options.requireAudit === true;
+  /** Who can't read a reply or a body it would have to pass on unread. */
+  const checker = policy ? "mcpspy's policy" : required ? "mcpspy's audit trail" : null;
   let recordingBroken = false;
   const record = (fn: () => void): void => {
     if (recordingBroken) return;
@@ -114,15 +119,20 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
       fn();
     } catch (error) {
       recordingBroken = true;
-      warn(`recording stopped, still proxying: ${(error as Error).message}`);
+      warn(required ? `refusing all traffic until restarted: ${AUDIT_STOPPED} (${(error as Error).message})` : `recording stopped, still proxying: ${(error as Error).message}`);
     }
+  };
+  /** Whether traffic must stop: everything from here on would go unrecorded. */
+  const stopped = (): boolean => required && recordingBroken;
+  const refuseStopped = (res: ServerResponse): void => {
+    res.writeHead(503, { 'content-type': 'text/plain' }).end(`mcpspy stopped: ${AUDIT_STOPPED}`);
   };
 
   const track = (transport: 'http' | 'sse'): Tracked => {
     const name = options.name ?? upstream.host;
     const command = JSON.stringify([redactor.text(upstream.href)]);
     const sessionId = store.createSession({ name, transport, command, cwd: process.cwd(), pid: null, started_at: Date.now() });
-    const audit = options.audit || policy ? new AuditTrail(store, sessionId, name) : null;
+    const audit = options.audit || policy || required ? new AuditTrail(store, sessionId, name) : null;
     record(() => audit?.started({ transport, command, cwd: process.cwd(), policy: policy?.identity() ?? null }));
     const tracked: Tracked = {
       sessionId,
@@ -176,6 +186,7 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
   });
 
   async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    if (stopped()) return refuseStopped(res);
     // Like the UI, refuse anything a web page could aim at us (DNS rebinding, cross-site POSTs).
     if (!isLoopbackHost(req.headers.host) || (req.headers.origin !== undefined && !isLoopbackOrigin(req.headers.origin))) {
       res.writeHead(403, { 'content-type': 'text/plain' }).end('mcpspy only proxies requests from localhost');
@@ -195,9 +206,9 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
     const method = req.method!;
     const body = method === 'GET' || method === 'HEAD' || method === 'DELETE' ? Buffer.alloc(0) : await readAll(req);
     // Only POST bodies are checked, so with a policy, a body on any other method (PUT, PATCH, …) never reaches the server.
-    if (policy && method !== 'POST' && body.length > 0) {
+    if (checker && method !== 'POST' && body.length > 0) {
       warn(`policy: refused a ${method} request with a body`);
-      res.writeHead(405, { 'content-type': 'text/plain', allow: 'GET, POST, DELETE' }).end(`mcpspy's policy only checks POST bodies, so it refuses a ${method} with one`);
+      res.writeHead(405, { 'content-type': 'text/plain', allow: 'GET, POST, DELETE' }).end(`${checker} only checks POST bodies, so it refuses a ${method} with one`);
       return;
     }
     const text = body.toString('utf8');
@@ -267,8 +278,9 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
         const reply = JSON.stringify({ jsonrpc: '2.0', id: parsed.id, ...decision.reply });
         const headers: Record<string, string> = { 'content-type': 'application/json' };
         if (sessionHeader !== null) headers['mcp-session-id'] = sessionHeader;
-        res.writeHead(200, headers).end(reply);
         record(() => session.recorder.frame('server', reply, decision.rule));
+        if (stopped()) return refuseStopped(res);
+        res.writeHead(200, headers).end(reply);
         return;
       }
       if (decision?.action === 'passthrough') {
@@ -277,6 +289,7 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
       }
     }
 
+    if (stopped()) return refuseStopped(res);
     const headers = upstreamHeaders(req.headers);
     if (forwarded.length > 0) headers['content-length'] = String(forwarded.length);
 
@@ -307,11 +320,11 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
       const encoding = header(up.headers, 'content-encoding');
       const encoded = encoding !== null && encoding !== 'identity';
       if (encoded && !DECODERS.has(encoding)) {
-        if (policy) {
-          // Replies the policy can't read can't be checked: hidden tools or unredacted results could get through.
+        if (checker) {
+          // Replies mcpspy can't read can't be checked or recorded: hidden tools or unredacted results could get through.
           up.resume();
           warn(`policy: refused a reply compressed with ${encoding}, which mcpspy can't read`);
-          res.writeHead(502, { 'content-type': 'text/plain' }).end(`mcpspy's policy can't check a reply compressed with ${encoding}`);
+          res.writeHead(502, { 'content-type': 'text/plain' }).end(`${checker} can't check a reply compressed with ${encoding}`);
           return;
         }
         res.writeHead(up.statusCode!, responseHeaders);
@@ -338,7 +351,10 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
         const session = tracked;
         if (session) hold(session, res);
         const parser = new SseParser((event) => {
-          res.write(session ? (onServerEvent(session, event, target, req.headers) ?? event.raw) : event.raw);
+          const text = session ? (onServerEvent(session, event, target, req.headers) ?? event.raw) : event.raw;
+          // Headers are gone, so all that can be said is that the stream ended.
+          if (stopped()) res.destroy();
+          else res.write(text);
         });
         source.on('data', (chunk: Buffer) => parser.push(chunk));
         source.on('end', () => {
@@ -375,6 +391,7 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
           const detail = decoded.trim().slice(0, 500);
           record(() => session.recorder.stderr(`[http] ${status} ${up.statusMessage} for ${method} ${local}${detail ? `: ${detail}` : ''}`));
         }
+        if (stopped()) return refuseStopped(res);
         res.writeHead(status, responseHeaders).end(raw);
 
         if (method === 'DELETE' && session && status < 300) end(session);
@@ -504,6 +521,7 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
       record(() => session.recorder.frame('server', text, 'policy'));
       res.end(formatSseEvent({ event: 'message', data: text }));
     };
+    if (stopped()) return fail(AUDIT_STOPPED);
     const upstreamReq = send(target, { method: 'POST', headers });
     upstreamReq.on('error', (error) => {
       record(() => session.recorder.stderr(`[http] POST ${target.href} failed: ${error.message}`));
@@ -519,7 +537,11 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
       }
       const source: NodeJS.ReadableStream = encoded ? decompress(up, encoding, () => res.destroy()) : up;
       if (header(up.headers, 'content-type')?.startsWith('text/event-stream')) {
-        const parser = new SseParser((event) => res.write(onServerEvent(session, event, target, req.headers) ?? event.raw));
+        const parser = new SseParser((event) => {
+          const text = onServerEvent(session, event, target, req.headers) ?? event.raw;
+          if (stopped()) res.destroy();
+          else res.write(text);
+        });
         source.on('data', (chunk: Buffer) => parser.push(chunk));
         source.on('end', () => res.end(parser.rest()));
         return;
@@ -535,6 +557,7 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
         }
         const shaped = shapeReply(session, reply);
         record(() => session.recorder.frame('server', shaped?.text ?? text, shaped?.rule ?? null));
+        if (stopped()) return fail(AUDIT_STOPPED);
         res.end(formatSseEvent({ event: 'message', data: shaped?.text ?? text }));
       });
     });
