@@ -17,6 +17,8 @@ export interface CollectorOptions {
   tls?: { cert: string | Buffer; key: string | Buffer };
   /** A machine not heard from for this long shows as silent. */
   silentAfterMs?: number;
+  /** Whether the page should show how alert delivery is going. */
+  showAlerts?: boolean;
 }
 
 export interface Collector {
@@ -139,7 +141,7 @@ export async function startCollector(options: CollectorOptions): Promise<Collect
     const filter = { machine: url.searchParams.get('machine') ?? undefined, denied: url.searchParams.get('denied') === '1' };
     switch (url.pathname) {
       case '/': {
-        const page = renderPage({ machines: store.machines(), incidents: store.incidents(), events: store.events({ ...filter, limit }), filter, now: Date.now(), silentAfterMs });
+        const page = renderPage({ machines: store.machines(), incidents: store.incidents(), events: store.events({ ...filter, limit }), filter, now: Date.now(), silentAfterMs, alerts: options.showAlerts ? store.alertStatus() : undefined });
         res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' }).end(page);
         return;
       }

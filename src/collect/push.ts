@@ -18,8 +18,8 @@ export interface PushResult {
   problems: string[];
 }
 
-/** Tokens and audit events are sensitive, so they only cross a network encrypted, unless told otherwise. */
-export function assertSafeUrl(url: string, allowPlain: boolean): URL {
+/** Tokens, audit events and webhook secrets are sensitive, so they only cross a network encrypted, unless told otherwise. */
+export function assertSafeUrl(url: string, allowPlain: boolean, what = 'your token and audit trail', flag = '--insecure-http'): URL {
   let parsed: URL;
   try {
     parsed = new URL(url);
@@ -28,7 +28,7 @@ export function assertSafeUrl(url: string, allowPlain: boolean): URL {
   }
   if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') throw new Error(`${url} is not an http(s) URL`);
   if (parsed.protocol === 'http:' && !isLoopbackHost(parsed.host) && !allowPlain) {
-    throw new Error(`${url} would send your token and audit trail unencrypted; use https, or pass --insecure-http if the network is already protected`);
+    throw new Error(`${url} would send ${what} unencrypted; use https, or pass ${flag} if the network is already protected`);
   }
   return parsed;
 }

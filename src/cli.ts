@@ -4,6 +4,7 @@ import { resolve } from 'node:path';
 import { createInterface } from 'node:readline';
 import { parseArgs } from 'node:util';
 import { checkMessages, eventData, EXPORT_HEADER, parseAnchor, parseExport, verifyChain, type Anchor, type AuditEvent, type ChainReport } from './audit.js';
+import { sendTestAlert, startAlerts, type Alerts } from './collect/alerts.js';
 import { assertSafeUrl, describeHead, followAudit, pushAudit } from './collect/push.js';
 import { machineStatus } from './collect/page.js';
 import { startCollector } from './collect/server.js';
@@ -75,7 +76,10 @@ Usage:
   mcpspy audit push <collector-url> [--follow] [--interval <30>] [--insecure-http] [--db <path>]
                                            send the trail to a collector (token in $MCPSPY_COLLECT_TOKEN)
   mcpspy collect [--port <7900>] [--host <127.0.0.1>] [--tls-cert <file> --tls-key <file>] [--plain-http]
-                 [--silent-after <1h>] [--db <path>]   receive trails from many machines and show them
+                 [--silent-after <1h>] [--alert-silent] [--insecure-webhook] [--db <path>]
+                                           receive trails from many machines and show them;
+                                           $MCPSPY_COLLECT_WEBHOOK sends alerts on incidents
+  mcpspy collect test-alert [--insecure-webhook]   send a test alert to the webhook
   mcpspy collect add <machine> [--db <path>]   register a machine and print its token, once
   mcpspy collect machines [--json] [--db <path>]
   mcpspy collect revoke <machine> [--db <path>]
@@ -587,6 +591,8 @@ function auditExport(argv: string[]): void {
   process.stderr.write(`Exported ${plural(count, 'audit event')}. Check it with mcpspy audit verify --file <file>.\n`);
 }
 
+const logLine = (message: string): void => void process.stderr.write(`[mcpspy] ${message}\n`);
+
 async function auditPush(argv: string[]): Promise<void> {
   const { values, positionals } = parseArgs({
     args: argv,
@@ -611,7 +617,7 @@ async function auditPush(argv: string[]): Promise<void> {
     process.once('SIGINT', () => stop.abort());
     process.once('SIGTERM', () => stop.abort());
     process.stderr.write(`Pushing to ${url} every ${intervalSeconds}s. Stop with Ctrl-C.\n`);
-    await followAudit(store, { url, token, intervalMs: intervalSeconds * 1000, signal: stop.signal, log: (message) => process.stderr.write(`[mcpspy] ${message}\n`) });
+    await followAudit(store, { url, token, intervalMs: intervalSeconds * 1000, signal: stop.signal, log: logLine });
     store.close();
     return;
   }
@@ -661,6 +667,8 @@ function collectCommand(argv: string[]): void | Promise<void> {
       return collectMachines(rest);
     case 'verify':
       return collectVerify(rest);
+    case 'test-alert':
+      return collectTestAlert(rest);
     default:
       return collectServe(argv);
   }
@@ -701,6 +709,35 @@ function collectVerify(argv: string[]): void {
   }
 }
 
+/**
+ * The webhook from the environment: its URL usually is the secret, so it
+ * doesn't belong on a command line.
+ */
+function webhookUrl(allowPlain: boolean | undefined): string | undefined {
+  const url = process.env.MCPSPY_COLLECT_WEBHOOK || undefined;
+  if (url !== undefined) {
+    try {
+      assertSafeUrl(url, allowPlain === true, 'your webhook address and alerts', '--insecure-webhook');
+    } catch (error) {
+      // The message may quote the address.
+      fail((error as Error).message.replace(url, 'MCPSPY_COLLECT_WEBHOOK'));
+    }
+  }
+  return url;
+}
+
+async function collectTestAlert(argv: string[]): Promise<void> {
+  const { values } = parseArgs({ args: argv, options: { 'insecure-webhook': { type: 'boolean' } } });
+  const url = webhookUrl(values['insecure-webhook']);
+  if (url === undefined) fail('set MCPSPY_COLLECT_WEBHOOK to the webhook address first');
+  try {
+    await sendTestAlert(url);
+  } catch (error) {
+    fail(`the test alert didn't get through: ${(error as Error).message}`);
+  }
+  process.stdout.write('Test alert sent. Check that it arrived where you expected.\n');
+}
+
 async function collectServe(argv: string[]): Promise<void> {
   const { values, positionals } = parseArgs({
     args: argv,
@@ -712,10 +749,14 @@ async function collectServe(argv: string[]): Promise<void> {
       'tls-key': { type: 'string' },
       'plain-http': { type: 'boolean' },
       'silent-after': { type: 'string', default: '1h' },
+      'alert-silent': { type: 'boolean' },
+      'insecure-webhook': { type: 'boolean' },
       db: { type: 'string' },
     },
   });
-  if (positionals.length > 0) fail(`unknown collect command "${positionals[0]}". Use add, machines, revoke or verify, or no command to serve.`);
+  if (positionals.length > 0) fail(`unknown collect command "${positionals[0]}". Use add, machines, revoke, verify or test-alert, or no command to serve.`);
+  const webhook = webhookUrl(values['insecure-webhook']);
+  if (values['alert-silent'] && webhook === undefined) fail('--alert-silent needs a webhook: set MCPSPY_COLLECT_WEBHOOK');
   if ((values['tls-cert'] === undefined) !== (values['tls-key'] === undefined)) fail('--tls-cert and --tls-key go together');
   const tls = values['tls-cert'] !== undefined ? { cert: readFileSync(values['tls-cert']), key: readFileSync(values['tls-key']!) } : undefined;
   if (!isLoopbackHost(values.host) && !tls && !values['plain-http']) {
@@ -731,14 +772,20 @@ async function collectServe(argv: string[]): Promise<void> {
   const store = new CollectorStore(values.db);
   // A fixed key lets a deployment keep its link across restarts; otherwise each run makes a new one.
   const viewKey = process.env.MCPSPY_COLLECT_VIEW_KEY || crypto.randomUUID().replaceAll('-', '');
-  const collector = await startCollector({ store, host: values.host, port, viewKey, tls, silentAfterMs }).catch((error: NodeJS.ErrnoException) => {
+  const collector = await startCollector({ store, host: values.host, port, viewKey, tls, silentAfterMs, showAlerts: webhook !== undefined }).catch((error: NodeJS.ErrnoException) => {
     store.close();
     if (error.code === 'EADDRINUSE') fail(`port ${values.port} is in use; pick another with --port`);
     throw error;
   });
   process.stdout.write(`mcpspy collector on ${collector.url}?key=${viewKey}  (data: ${values.db ?? defaultCollectorDbPath()})\n`);
+  let alerts: Alerts | undefined;
+  if (webhook !== undefined) {
+    store.enableAlerts();
+    alerts = startAlerts({ store, url: webhook, silentAfterMs: values['alert-silent'] ? silentAfterMs : null, log: logLine });
+    process.stdout.write(`Sending alerts on incidents${values['alert-silent'] ? ' and silent machines' : ''} to ${new URL(webhook).host}\n`);
+  }
   const stop = () => {
-    void collector.close().then(() => {
+    void Promise.all([collector.close(), alerts?.close()]).then(() => {
       store.close();
       process.exit(0);
     });

@@ -631,12 +631,73 @@ Nothing a machine sends can replace what's held, and that's what a saved anchor 
 
 The page refreshes itself and has no scripts. Filter with `?machine=` and `?denied=1`, or get JSON from `/api/machines`, `/api/incidents` and `/api/events`. The view needs the link `collect` prints; set `MCPSPY_COLLECT_VIEW_KEY` to keep the same link across restarts. `mcpspy collect machines` prints each machine's status and anchor, `mcpspy collect revoke <name>` stops one, and `mcpspy collect verify` re-checks the chains the collector holds, exiting 1 on a problem.
 
+#### Alerts
+
+A flagged machine only helps if someone notices. Set a webhook, and the collector tells you when it happens:
+
+```sh
+export MCPSPY_COLLECT_WEBHOOK=https://hooks.slack.com/services/…   # the address is often the secret, so it's not a flag
+mcpspy collect test-alert                                          # check it arrives
+mcpspy collect --alert-silent                                      # incidents, plus machines going silent and coming back
+```
+
+The request is a `POST` with this JSON. `text` is what Slack and compatible services show, and `alert` carries the fields for anything else. Other services may need a small adapter in between. Run `test-alert` to check yours.
+
+```json
+{
+  "text": "mcpspy: ben-xps was flagged: tampered at event 14. the machine's own check of its chain says: event 8 is missing: the next event is 11.",
+  "alert": { "kind": "incident", "machine": "ben-xps", "at": 1793791234000, "incident": { "kind": "tampered", "seq": 14, "detail": "…" } }
+}
+```
+
+| Alert | When | Default |
+| --- | --- | --- |
+| `incident` | A machine causes a new incident. A repeat of the same one only adds to its count on the page. | On |
+| `silent` | A machine that has pushed before isn't heard from within `--silent-after`. Once per silence. | With `--alert-silent` |
+| `recovered` | That machine pushes again. | With `--alert-silent` |
+
+Silence alerts are opt-in because laptops sleep: on a team of laptops, `--alert-silent` with a one-hour limit means a message per laptop every night. Use it where machines should always be on, or raise `--silent-after`.
+
+Alerts go through a queue in the collector's database, written in the same transaction as the incident, so a webhook outage or a restart can't lose one:
+
+```mermaid
+flowchart LR
+    I["New incident<br/>or silent machine"] -->|"same transaction"| Q[("alerts queue")]
+    Q --> D{"Webhook<br/>accepts it?"}
+    D -->|"2xx"| S["Marked sent"]
+    D -->|"anything else"| H["Hold the whole queue<br/>30s, doubling up to 1h"]
+    H --> Q
+    H -.-> P["Warning on the page<br/>and in the log"]
+```
+
+```text
+every 5 seconds:
+    if --alert-silent: queue an alert for each machine newly gone quiet
+    if holding after a failure: stop here
+    for each alert due, oldest first:
+        post it (10 second timeout, no redirects)
+        if accepted: mark it sent
+        else: hold everything until the retry, and stop
+```
+
+- **Alerts can arrive twice, but aren't lost.** One is only marked sent after the webhook accepts it, so a crash in between sends it again.
+- **A failing webhook shows on the page.** So does the number of alerts waiting, and the log says when delivery stops and starts again.
+
+<p align="center">
+    <img src="docs/collector-alerts.png" alt="The collector page warning that alerts aren't getting through because it couldn't reach the webhook, with 1 alert waiting, 2 machines flagged and both incidents listed." width="900">
+</p>
+
+- **A machine can't use alerts against you.** Part of an alert's text comes from the machine, so `<`, `>` and `&` are escaped, control characters removed and long details cut short. It can't ping `<!channel>`, post a disguised link or fake a second line. Each machine can raise 5 incident alerts an hour, and the fifth says so. Every incident still goes on the page.
+- **The webhook address stays private.** It's never logged or shown beyond its host, and neither is what the webhook answers. It must be `https` unless it's on this machine or you pass `--insecure-webhook`, and redirects aren't followed.
+- **Turning alerts on sends no backlog.** Only incidents after that point alert, and a page full of old ones stays quiet. There's one webhook per collector, and requests aren't signed, so treat its address as a secret.
+
 **What the collector can and can't tell you:**
 
 - **It's what leaves the machine.** Users and hostnames, working directories, commands or URLs, tool names, resource URIs and policy reasons, after redaction. Arguments and results stay behind, as hashes. Check that this fits your policies before pointing a team at a collector.
 - **It proves the record hasn't changed since it arrived, not that it was true.** Someone in control of a machine can rewrite events before the first push, run altered mcpspy code, or stop pushing, which shows as `silent`. Frequent pushes make the window small. Combine with `--require-audit` so sessions can't run unrecorded.
 - **The collector's own host is trusted.** `collect verify` finds edits to its file, but someone with full access to it could rebuild a chain and its head. Back it up, and restrict who can reach it.
 - **Times are what each machine reported.** The list is ordered by when events arrived, so a wrong clock can't move an event to the top.
+- **Alerts are only as good as the collector.** If the collector itself goes down, nothing raises an alert about that. Monitor it the way you monitor anything else.
 - **It's built for one team.** One view key rather than user accounts, one SQLite file, no rate limits, and nothing trims old events.
 
 ### 🔒 Secrets
@@ -677,8 +738,8 @@ Patterns can't catch everything, such as a password in free text with nothing ar
 | `mcpspy audit [--session <id>] [--denied] [-n <50>] [--json]` | List the audit trail (see [Audit trail](#-audit-trail)). |
 | `mcpspy audit verify [--anchor <seq:hash>] [--file <export>]` / `mcpspy audit export` | Check the trail for changes, and write it out as JSON Lines. |
 | `mcpspy audit push <url> [--follow] [--interval <30>] [--insecure-http]` | Send the trail to a collector, with the token in `$MCPSPY_COLLECT_TOKEN` (see [Collecting from many machines](#-collecting-from-many-machines)). |
-| `mcpspy collect [--port 7900] [--host <addr>] [--tls-cert <file> --tls-key <file>] [--plain-http] [--silent-after <1h>]` | Receive trails from many machines, and serve the view at the link it prints. |
-| `mcpspy collect add <machine>` / `revoke <machine>` / `machines [--json]` / `verify` | Register a machine and print its token once, stop one, list them with their anchors, and re-check what's held. Its data is in `~/.mcpspy/collector.db`, or `$MCPSPY_COLLECT_DB`. |
+| `mcpspy collect [--port 7900] [--host <addr>] [--tls-cert <file> --tls-key <file>] [--plain-http] [--silent-after <1h>] [--alert-silent] [--insecure-webhook]` | Receive trails from many machines, and serve the view at the link it prints. `$MCPSPY_COLLECT_WEBHOOK` sends [alerts](#alerts). |
+| `mcpspy collect add <machine>` / `revoke <machine>` / `machines [--json]` / `verify` / `test-alert` | Register a machine and print its token once, stop one, list them with their anchors, re-check what's held, and try the webhook. Its data is in `~/.mcpspy/collector.db`, or `$MCPSPY_COLLECT_DB`. |
 | `mcpspy prune [--older-than 30d] [--keep <n>] [--max-size 500MB] [--dry-run] [--vacuum]` | Delete old sessions so the log stops growing; `MCPSPY_RETENTION` makes `mcpspy ui` do it daily. |
 | `mcpspy validate [--session <id>]` | List schema and protocol issues; exits 1 if there are errors. |
 | `mcpspy mock serve <file>` / `mcpspy mock add <file> <id>...` | Run a stand-in server from mock rules; turn recorded calls into rules. |
@@ -981,6 +1042,7 @@ src/
 │   ├── store.ts        ← mcpspy collect: one chain per machine, and incidents
 │   ├── server.ts       ← its HTTP API, tokens and view key
 │   ├── page.ts         ← its web view, rendered on the server
+│   ├── alerts.ts       ← its webhook alerts: wording, delivery and retries
 │   └── push.ts         ← mcpspy audit push
 ├── rpc-client.ts · http-client.ts     ← the minimal clients replay and suites use
 ├── replay.ts · suite.ts · diff.ts
