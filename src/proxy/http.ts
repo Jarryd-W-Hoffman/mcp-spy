@@ -2,6 +2,7 @@ import { createServer, request as httpRequest, type IncomingHttpHeaders, type In
 import { request as httpsRequest } from 'node:https';
 import type { AddressInfo } from 'node:net';
 import { createBrotliDecompress, createGunzip, createInflate } from 'node:zlib';
+import { AuditTrail } from '../audit.js';
 import type { MockEngine } from '../mocks.js';
 import type { PolicyEngine } from '../policy.js';
 import { Recorder } from '../recorder.js';
@@ -23,6 +24,8 @@ export interface HttpProxyOptions {
   mocks?: MockEngine;
   /** A policy the agent's requests must pass before they're forwarded (see src/policy.ts). */
   policy?: PolicyEngine;
+  /** Keep an audit trail of these sessions, as a policy always does. */
+  audit?: boolean;
   /**
    * Headers to send upstream with every request, replacing the agent's (e.g. an
    * Authorization token, so the agent needn't log in). Never recorded.
@@ -55,6 +58,7 @@ const HOP_BY_HOP = new Set(['connection', 'keep-alive', 'proxy-authenticate', 'p
 interface Tracked {
   sessionId: number;
   recorder: Recorder;
+  audit: AuditTrail | null;
   open: boolean;
   /** When the agent or server last sent anything in this session. */
   lastSeen: number;
@@ -115,17 +119,15 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
   };
 
   const track = (transport: 'http' | 'sse'): Tracked => {
-    const sessionId = store.createSession({
-      name: options.name ?? upstream.host,
-      transport,
-      command: JSON.stringify([redactor.text(upstream.href)]),
-      cwd: process.cwd(),
-      pid: null,
-      started_at: Date.now(),
-    });
+    const name = options.name ?? upstream.host;
+    const command = JSON.stringify([redactor.text(upstream.href)]);
+    const sessionId = store.createSession({ name, transport, command, cwd: process.cwd(), pid: null, started_at: Date.now() });
+    const audit = options.audit || policy ? new AuditTrail(store, sessionId, name) : null;
+    record(() => audit?.started({ transport, command, cwd: process.cwd(), policy: policy?.identity() ?? null }));
     const tracked: Tracked = {
       sessionId,
-      recorder: new Recorder(store, sessionId, undefined, redactor),
+      recorder: new Recorder(store, sessionId, undefined, redactor, audit),
+      audit,
       open: true,
       lastSeen: Date.now(),
       busy: 0,
@@ -160,7 +162,9 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
       for (const [key, value] of map) if (value === tracked) map.delete(key);
     }
     if (fallback === tracked) fallback = null;
-    record(() => store.endSession(tracked.sessionId, { ended_at: Date.now(), exit_code: null, exit_signal: null }));
+    const ending = { exit_code: null, exit_signal: null };
+    record(() => store.endSession(tracked.sessionId, { ended_at: Date.now(), ...ending }));
+    record(() => tracked.audit?.ended(ending));
   };
 
   const server = createServer((req, res) => {
@@ -416,6 +420,7 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
     const message = parsed as { id?: unknown; method?: unknown; params?: unknown };
     if (typeof message !== 'object' || message === null || typeof message.method !== 'string') return null;
     const verdict = policy!.check(message.method, message.params);
+    record(() => session.audit?.verdict(message.method as string, message.params, verdict, policy!.identity().sha256));
     if (verdict.allow) return null;
     const what = message.method === 'tools/call' ? `tools/call ${(message.params as { name: string }).name}` : message.method;
     // Asking holds the call's response open as an event stream and sends the question on it. The legacy
@@ -557,7 +562,7 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
 
     // Requests and notifications only servers send pass the policy first; refused ones never reach the agent.
     const items = Array.isArray(parsed) ? (parsed as unknown[]) : [parsed];
-    const checked = items.map((item) => checkFromServer({ policy, warn }, item));
+    const checked = items.map((item) => checkFromServer({ policy, warn, onVerdict: (method, params, verdict) => record(() => session.audit?.verdict(method, params, verdict, policy!.identity().sha256)) }, item));
     const refusedBy = checked.find((refused) => refused !== null)?.rule;
     if (refusedBy !== undefined) {
       const kept = items.filter((_item, index) => checked[index] === null);

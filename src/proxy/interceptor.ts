@@ -1,5 +1,7 @@
 import type { MockEngine } from '../mocks.js';
-import { sentByServer, type PolicyEngine } from '../policy.js';
+import { sentByServer, type PolicyEngine, type Verdict } from '../policy.js';
+
+export type VerdictObserver = (method: string, params: unknown, verdict: Verdict) => void;
 
 /** JSON-RPC error code for requests a policy refuses (in the implementation-defined server error range). */
 export const POLICY_ERROR = -32001;
@@ -7,6 +9,8 @@ export const POLICY_ERROR = -32001;
 export interface InterceptorOptions {
   mocks: MockEngine | null;
   policy: PolicyEngine | null;
+  /** Told what the policy decided about each message it checks. */
+  onVerdict?: VerdictObserver;
   toServer(line: string): void;
   toClient(line: string): void;
   /** Records a reply the proxy wrote itself, with the rule that wrote it. */
@@ -91,6 +95,7 @@ export class Interceptor {
 
     if (policy) {
       const verdict = policy.check(request.method, request.params);
+      this.options.onVerdict?.(request.method, request.params, verdict);
       if (!verdict.allow) {
         const what = request.method === 'tools/call' ? `tools/call ${(request.params as { name: string }).name}` : request.method;
         if (verdict.ask !== undefined && request.id !== undefined && this.canAsk) return this.ask(request, what, verdict.rule, verdict.ask);
@@ -276,11 +281,12 @@ export function askRequest(askId: string, prompt: string, what: string, params: 
  * server with, so it isn't left waiting. A refused notification is just dropped.
  */
 export function checkFromServer(
-  { policy, warn }: { policy: PolicyEngine | null; warn(message: string): void },
+  { policy, warn, onVerdict }: { policy: PolicyEngine | null; warn(message: string): void; onVerdict?: VerdictObserver },
   item: unknown,
 ): { rule: string; answer: string | null } | null {
   if (!policy || !isObject(item) || typeof item.method !== 'string' || !sentByServer(item.method)) return null;
   const verdict = policy.check(item.method, item.params);
+  onVerdict?.(item.method, item.params, verdict);
   if (verdict.allow) return null;
   warn(`policy denied ${item.method} from the server (${verdict.rule}): ${verdict.reason}`);
   return { rule: `policy: ${verdict.rule}`, answer: item.id !== undefined ? JSON.stringify(refusal(item.id, verdict.reason)) : null };

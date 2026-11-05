@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { homedir } from 'node:os';
@@ -240,6 +241,8 @@ export class PolicyEngine {
   /** When each rate-limited rule last let calls through, within its period. */
   private readonly calls = new Map<CompiledRule, number[]>();
   private missing = false;
+  /** Hash of the file behind the rules in force, so a decision can name the exact policy. */
+  private sha256: string | null = null;
 
   constructor(
     private readonly path: string | null,
@@ -255,6 +258,11 @@ export class PolicyEngine {
   ) {
     if (initial) this.policy = initial;
     else this.policy = this.read();
+  }
+
+  /** Which policy is in force: its file, and the hash of the text its rules came from. */
+  identity(): { path: string | null; sha256: string | null } {
+    return { path: this.path, sha256: this.sha256 };
   }
 
   /** Whether the agent may send this request. */
@@ -377,7 +385,10 @@ export class PolicyEngine {
     const path = this.path!;
     try {
       this.mtime = statSync(path).mtimeMs;
-      return parsePolicy(readFileSync(path, 'utf8'), dirname(path));
+      const text = readFileSync(path, 'utf8');
+      const policy = parsePolicy(text, dirname(path));
+      this.sha256 = createHash('sha256').update(text).digest('hex');
+      return policy;
     } catch (error) {
       throw new Error(`${path}: ${(error as Error).message}`);
     }

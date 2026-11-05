@@ -3,6 +3,7 @@ import { chmodSync, createReadStream, existsSync, readFileSync, realpathSync, re
 import { resolve } from 'node:path';
 import { createInterface } from 'node:readline';
 import { parseArgs } from 'node:util';
+import { checkMessages, eventData, EXPORT_HEADER, parseAnchor, parseExport, verifyChain, type Anchor, type AuditEvent, type ChainReport } from './audit.js';
 import { comparableBody, diffLines, hunks, jsonLines } from './diff.js';
 import {
   errorSummary,
@@ -41,9 +42,9 @@ import { unwrapConfig, wrapConfig, type WrapChange } from './wrap.js';
 const HELP = `mcpspy - see what your AI agent and its MCP servers say to each other
 
 Usage:
-  mcpspy run [--name <label>] [--policy <file>] [--mocks <file>] [--redact <regex>]... [--no-redact] [--db <path>] -- <command> [args...]
+  mcpspy run [--name <label>] [--policy <file>] [--audit] [--mocks <file>] [--redact <regex>]... [--no-redact] [--db <path>] -- <command> [args...]
   mcpspy -- <command> [args...]            shorthand for run
-  mcpspy proxy <url> [--port <7800>] [--name <label>] [--policy <file>] [--mocks <file>] [-H 'Name: value']... [--login]
+  mcpspy proxy <url> [--port <7800>] [--name <label>] [--policy <file>] [--audit] [--mocks <file>] [-H 'Name: value']... [--login]
                                            [--redact <regex>]... [--no-redact]
                                            proxy an MCP server over HTTP (Streamable HTTP or SSE)
   mcpspy tail [-f] [-n <count>] [--session <id>] [--json] [--db <path>]
@@ -60,10 +61,13 @@ Usage:
   mcpspy mock serve <file> [--name <label>]  a fake MCP server driven by mock rules
   mcpspy mock add <file> <message-id>...     turn recorded calls into mock rules
   mcpspy policy suggest [--session <id>]    draft a policy allowing what a session did
-  mcpspy wrap [<config>] [--only <name>]... [--dry-run] [--command <path>] [--db <path>] [--mocks <file>] [--policy <file>]
+  mcpspy wrap [<config>] [--only <name>]... [--dry-run] [--command <path>] [--db <path>] [--mocks <file>] [--policy <file>] [--audit]
   mcpspy unwrap [<config>] [--only <name>]... [--dry-run]
   mcpspy export [--session <id>]... [--db <path>] > log.jsonl   all sessions by default
   mcpspy import <file | -> [--db <path>]
+  mcpspy audit [--session <id>] [--denied] [-n <50>] [--json] [--db <path>]
+  mcpspy audit verify [--anchor <seq:hash>] [--file <export>] [--db <path>]
+  mcpspy audit export [--db <path>] > audit.jsonl
   mcpspy prune [--older-than <30d>] [--keep <n>] [--max-size <500MB>] [--dry-run] [--vacuum] [--db <path>]
 
 mcpspy wrap puts mcpspy in front of every stdio server in an MCP config
@@ -90,6 +94,9 @@ patterns with --redact <regex>, or turn the built-in ones off with --no-redact.
 The log is a SQLite database at ${defaultDbPath()} (override with --db or MCPSPY_DB).
 It grows until you prune it: mcpspy prune deletes old sessions, or set
 MCPSPY_RETENTION (e.g. 30d, 1GB or 30d,1GB) and mcpspy ui prunes daily.
+
+With --policy or --audit, a session also adds to a hash-chained audit trail that
+prune leaves alone. See it with mcpspy audit, and check it with mcpspy audit verify.
 Nothing leaves your machine, except with tokens --exact, which sends the recorded
 tool definitions and results to Anthropic's count_tokens API.`;
 
@@ -152,6 +159,8 @@ export async function main(argv: string[]): Promise<void> {
       return exportCommand(rest);
     case 'import':
       return importCommand(rest);
+    case 'audit':
+      return auditCommand(rest);
     case 'prune':
       return prune(rest);
     case 'wrap':
@@ -169,7 +178,7 @@ async function run(argv: string[]): Promise<void> {
 
   const { values } = parseArgs({
     args: argv.slice(0, separator),
-    options: { name: { type: 'string' }, mocks: { type: 'string' }, policy: { type: 'string' }, db: { type: 'string' }, ...REDACT_OPTIONS },
+    options: { name: { type: 'string' }, mocks: { type: 'string' }, policy: { type: 'string' }, audit: { type: 'boolean' }, db: { type: 'string' }, ...REDACT_OPTIONS },
   });
   const [command, ...args] = argv.slice(separator + 1) as [string, ...string[]];
 
@@ -186,7 +195,7 @@ async function run(argv: string[]): Promise<void> {
     process.stderr.write(`[mcpspy] can't open the log at ${values.db ?? defaultDbPath()} (${(error as Error).message}); proxying without recording\n`);
     store = new Store(':memory:');
   }
-  const { exitCode } = await runStdioProxy({ command, args, store, name: values.name ?? null, mocks, policy, redactor });
+  const { exitCode } = await runStdioProxy({ command, args, store, name: values.name ?? null, mocks, policy, audit: values.audit, redactor });
   store.close();
 
   // stdin may still be open (the agent closed nothing); don't let it hold us up.
@@ -204,6 +213,7 @@ async function proxyCommand(argv: string[]): Promise<void> {
       name: { type: 'string' },
       mocks: { type: 'string' },
       policy: { type: 'string' },
+      audit: { type: 'boolean' },
       header: { type: 'string', multiple: true, short: 'H' },
       login: { type: 'boolean' },
       db: { type: 'string' },
@@ -236,7 +246,7 @@ async function proxyCommand(argv: string[]): Promise<void> {
   const store = new Store(values.db);
   let proxy: HttpProxy;
   try {
-    proxy = await startHttpProxy({ upstream: positionals[0]!, store, name: values.name ?? null, host: values.host, port, mocks, policy, headers, login, redactor });
+    proxy = await startHttpProxy({ upstream: positionals[0]!, store, name: values.name ?? null, host: values.host, port, mocks, policy, audit: values.audit, headers, login, redactor });
   } catch (error) {
     await login?.close();
     const code = (error as NodeJS.ErrnoException).code;
@@ -459,6 +469,102 @@ async function tail(argv: string[]): Promise<void> {
     clearInterval(timer);
     store.close();
   });
+}
+
+function auditCommand(argv: string[]): void {
+  const [first, ...rest] = argv;
+  if (first === 'verify') return auditVerify(rest);
+  if (first === 'export') return auditExport(rest);
+  const { values, positionals } = parseArgs({
+    args: argv,
+    allowPositionals: true,
+    options: { session: { type: 'string' }, denied: { type: 'boolean' }, n: { type: 'string', short: 'n', default: '50' }, json: { type: 'boolean' }, db: { type: 'string' } },
+  });
+  if (positionals.length > 0) fail(`unknown audit command "${positionals[0]}". Use verify or export, or no command to list events.`);
+  const sessionId = values.session !== undefined ? parseId(values.session, '--session') : undefined;
+  const limit = parseId(values.n, '-n');
+  const store = new Store(values.db);
+  const events = store.recentAudit({ sessionId, denied: values.denied, limit });
+  store.close();
+  const style = styleFor(process.stdout);
+  for (const event of events) process.stdout.write(`${values.json ? JSON.stringify({ ...event, data: eventData(event) }) : formatAuditEvent(event, style)}\n`);
+  if (events.length === 0 && !values.json) process.stdout.write('No audit events. A session adds them when it runs with --policy or --audit.\n');
+}
+
+function formatAuditEvent(event: AuditEvent, style: Style): string {
+  // Tool names and reasons come from the agent and the server: control characters could forge lines or hide them.
+  const plain = (value: unknown) => (typeof value === 'string' ? value.replace(/[\u0000-\u001f\u007f-\u009f]/g, '?') : value);
+  const data = Object.fromEntries(Object.entries(eventData(event)).map(([key, value]) => [key, plain(value)])) as Record<string, string | number | null>;
+  const name = String(data.subject ?? data.method ?? '');
+  const details: Record<AuditEvent['type'], () => string> = {
+    session_start: () => `${data.user}@${data.host} ${data.command}${data.policy ? ' (with policy)' : ''}`,
+    session_end: () => (data.exit_signal ? `signal ${data.exit_signal}` : data.exit_code === null ? 'ended' : `exit ${data.exit_code}`),
+    call: () => `${name}${data.agent ? ` (${data.agent})` : ''}`,
+    verdict: () => {
+      const label = data.decision === 'deny' ? style.red('deny') : data.decision === 'ask' ? style.yellow('ask') : style.green('allow');
+      return `${label} ${name}${data.rule ? ` (${data.rule})` : ''}${data.reason ? `: ${data.reason}` : ''}`;
+    },
+    approval: () => `user answered: ${data.action}`,
+    outcome: () => `${name} ${data.status}${data.rule ? ` (${data.rule})` : ''}`,
+  };
+  const when = new Date(event.ts).toISOString().replace('T', ' ').slice(0, 19);
+  return `${style.dim(when)}  ${String(event.seq).padStart(5)}  #${String(event.session_id).padEnd(4)} ${String(data.server ?? '-').padEnd(12)} ${event.type.padEnd(13)} ${details[event.type]()}`;
+}
+
+function auditVerify(argv: string[]): void {
+  const { values } = parseArgs({ args: argv, options: { anchor: { type: 'string' }, file: { type: 'string' }, db: { type: 'string' } } });
+  let anchor: Anchor | undefined;
+  let events: AuditEvent[] | undefined;
+  try {
+    anchor = values.anchor !== undefined ? parseAnchor(values.anchor) : undefined;
+    events = values.file !== undefined ? parseExport(readFileSync(values.file, 'utf8')) : undefined;
+  } catch (error) {
+    fail((error as Error).message);
+  }
+  const style = styleFor(process.stdout);
+  const out = (line: string) => process.stdout.write(`${line}\n`);
+  let report: ChainReport;
+  if (events) {
+    report = verifyChain(events, anchor);
+  } else {
+    const store = new Store(values.db);
+    report = verifyChain(store.auditEvents(), anchor);
+    // Checked only on an intact chain: otherwise the hashes it would compare against can't be trusted.
+    if (report.problems.length === 0) {
+      const highWater = store.auditHighWater();
+      if (report.head?.seq !== highWater && highWater > 0) report.problems.push(`events after ${report.head?.seq ?? 0} are missing: the log has reached event ${highWater}`);
+      const messages = checkMessages(store.auditEvents(), (id) => store.getMessage(id));
+      for (const id of messages.changed) report.problems.push(`message ${id} was changed: it doesn't match the hash in the chain`);
+      if (report.problems.length === 0 && report.count > 0) out(`Recorded messages matching the chain: ${messages.matched}${messages.gone > 0 ? ` (${messages.gone} more are no longer in the log, usually pruned)` : ''}.`);
+    }
+    store.close();
+  }
+  if (report.problems.length > 0) {
+    for (const problem of report.problems) out(style.red(`  ✗ ${problem}`));
+    out(style.red('The audit trail failed verification.'));
+    process.exitCode = 1;
+    return;
+  }
+  if (!report.head) {
+    out('No audit events to verify.');
+    return;
+  }
+  out(style.green(`Intact: ${plural(report.count, 'event')}${anchor ? `, and the anchor at event ${anchor.seq} matches` : ''}.`));
+  out(`Anchor: ${report.head.seq}:${report.head.hash}`);
+  out(style.dim('Save it somewhere this machine can\'t change, and pass it to --anchor later: without one, a rewrite of the whole chain can\'t be detected.'));
+}
+
+function auditExport(argv: string[]): void {
+  const { values } = parseArgs({ args: argv, options: { db: { type: 'string' } } });
+  const store = new Store(values.db);
+  process.stdout.write(`${JSON.stringify(EXPORT_HEADER)}\n`);
+  let count = 0;
+  for (const event of store.auditEvents()) {
+    process.stdout.write(`${JSON.stringify(event)}\n`);
+    count++;
+  }
+  store.close();
+  process.stderr.write(`Exported ${plural(count, 'audit event')}. Check it with mcpspy audit verify --file <file>.\n`);
 }
 
 function exportCommand(argv: string[]): void {
@@ -1112,9 +1218,9 @@ function wrapCommand(argv: string[], mode: 'wrap' | 'unwrap'): void {
     options: {
       only: { type: 'string', multiple: true },
       'dry-run': { type: 'boolean' },
-      ...(mode === 'wrap' ? { command: { type: 'string' }, db: { type: 'string' }, mocks: { type: 'string' }, policy: { type: 'string' } } : {}),
+      ...(mode === 'wrap' ? { command: { type: 'string' }, db: { type: 'string' }, mocks: { type: 'string' }, policy: { type: 'string' }, audit: { type: 'boolean' } } : {}),
     },
-  }) as { values: { only?: string[]; 'dry-run'?: boolean; command?: string; db?: string; mocks?: string; policy?: string }; positionals: string[] };
+  }) as { values: { only?: string[]; 'dry-run'?: boolean; command?: string; db?: string; mocks?: string; policy?: string; audit?: boolean }; positionals: string[] };
   if (positionals.length > 1) fail(`${mode} takes one config file`);
   const path = positionals[0] ?? '.mcp.json';
   if (!existsSync(path)) fail(`no ${path} here; pass the path to your agent's MCP config`);
@@ -1135,7 +1241,7 @@ function wrapCommand(argv: string[], mode: 'wrap' | 'unwrap'): void {
   try {
     changed =
       mode === 'wrap'
-        ? wrapConfig(config, { only: values.only, command: values.command, db: values.db, mocks: values.mocks, policy })
+        ? wrapConfig(config, { only: values.only, command: values.command, db: values.db, mocks: values.mocks, policy, audit: values.audit })
         : unwrapConfig(config, { only: values.only });
   } catch (error) {
     fail(`${path}: ${(error as Error).message}`);

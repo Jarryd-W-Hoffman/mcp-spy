@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process';
 import { constants } from 'node:os';
 import type { Readable, Writable } from 'node:stream';
+import { AuditTrail } from '../audit.js';
 import { LineSplitter } from '../framing.js';
 import { Recorder } from '../recorder.js';
 import { Redactor } from '../redact.js';
@@ -26,6 +27,8 @@ export interface StdioProxyOptions {
   mocks?: MockEngine;
   /** A policy the agent's requests must pass; traffic is handled line by line, as with mocks. */
   policy?: PolicyEngine;
+  /** Keep an audit trail of this session, as a policy always does. */
+  audit?: boolean;
   /** How long a policy's ask waits for the agent's user; two minutes by default. */
   askTimeoutMs?: number;
   /** What to remove from the record; built-in secret patterns by default. */
@@ -75,7 +78,8 @@ export function runStdioProxy(options: StdioProxyOptions): Promise<StdioProxyRes
     store = new Store(':memory:');
     sessionId = store.createSession(session);
   }
-  const recorder = new Recorder(store, sessionId, undefined, redactor);
+  const audit = options.audit || options.policy ? new AuditTrail(store, sessionId, session.name) : null;
+  const recorder = new Recorder(store, sessionId, undefined, redactor, audit);
 
   let recordingBroken = false;
   const record = (fn: () => void): void => {
@@ -87,7 +91,7 @@ export function runStdioProxy(options: StdioProxyOptions): Promise<StdioProxyRes
       errorOutput.write(`[mcpspy] recording stopped, still proxying: ${(error as Error).message}\n`);
     }
   };
-
+  record(() => audit?.started({ transport: session.transport, command: session.command, cwd, policy: options.policy?.identity() ?? null }));
 
   return new Promise((resolve) => {
     const child = spawn(command, args, {
@@ -105,6 +109,7 @@ export function runStdioProxy(options: StdioProxyOptions): Promise<StdioProxyRes
         ? new Interceptor({
             mocks: options.mocks ?? null,
             policy: options.policy ?? null,
+            onVerdict: (method, params, verdict) => record(() => audit?.verdict(method, params, verdict, options.policy!.identity().sha256)),
             toServer,
             toClient,
             recordReply: (line, rule) => record(() => recorder.frame('server', line, rule)),
@@ -145,7 +150,9 @@ export function runStdioProxy(options: StdioProxyOptions): Promise<StdioProxyRes
       fromClient.flush();
       fromServer.flush();
       fromStderr.flush();
-      record(() => store.endSession(sessionId, { ended_at: Date.now(), exit_code: signal ? null : exitCode, exit_signal: signal }));
+      const end = { exit_code: signal ? null : exitCode, exit_signal: signal };
+      record(() => store.endSession(sessionId, { ended_at: Date.now(), ...end }));
+      record(() => audit?.ended(end));
       resolve({ sessionId, exitCode });
     };
 
