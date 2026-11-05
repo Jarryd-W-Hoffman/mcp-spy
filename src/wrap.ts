@@ -16,8 +16,6 @@ export interface WrapOptions {
   policy?: string;
   /** Keep an audit trail even without a policy. */
   audit?: boolean;
-  /** Stop a server's session rather than let traffic go unrecorded. */
-  requireAudit?: boolean;
 }
 
 export interface WrapChange {
@@ -43,7 +41,6 @@ export function wrapConfig(config: unknown, options: WrapOptions = {}): { config
       ...(options.mocks !== undefined ? ['--mocks', options.mocks] : []),
       ...(options.policy !== undefined ? ['--policy', options.policy] : []),
       ...(options.audit ? ['--audit'] : []),
-      ...(options.requireAudit ? ['--require-audit'] : []),
       '--',
       entry.command as string,
       ...stringArgs(entry),
